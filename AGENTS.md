@@ -23,9 +23,10 @@ the Python reference engine's behavior and output distribution.
 
 ## Current repository state
 
-Stages 1 and 2 are implemented. The dependency-free Python correctness engine is
-still the oracle, and an optional Hugging Face/PyTorch adapter now connects it to
-real causal language models. The repository does not yet contain C++ or CUDA.
+Stages 1 through 3 are implemented. The dependency-free Python engine remains the
+oracle, the Hugging Face adapter connects real causal models, and an optional
+C++17 shared library handles sampling and vectorized verification. CUDA is not
+implemented.
 
 Implemented:
 
@@ -44,13 +45,20 @@ Implemented:
 - exact draft/target tokenizer and model-vocabulary validation;
 - prompt and optional chat-template encoding;
 - token callbacks identifying accepted, corrected, bonus, and fallback output;
-- a configurable real-model CLI with independent model devices and revisions.
+- a configurable real-model CLI with independent model devices and revisions;
+- a CMake-based native library with a stable, versioned C ABI;
+- native normalization, categorical sampling, residual construction, vectorized
+  acceptance probabilities, and first-rejection detection;
+- lazy `ctypes` bindings with `auto`, `python`, and `native` selection modes;
+- exact RNG ownership in Python and seeded Python/native parity tests;
+- dependency-free C++ tests and a plain-C public-header test.
 
 Not implemented yet:
 
 - an HTTP or production serving layer;
 - KV-cache reuse and rejected-suffix cache rollback;
-- C++, Python bindings, CUDA, PagedAttention, or INT8 KV-cache code;
+- CUDA, PagedAttention, or INT8 KV-cache code;
+- platform-specific native wheel production;
 - GPU benchmark and profiling infrastructure;
 - validated performance numbers on NVIDIA hardware.
 
@@ -61,19 +69,28 @@ Do not describe a planned feature or target metric as completed.
 ```text
 .
 ├── AGENTS.md                    contributor and agent operating guide
+├── CMakeLists.txt               root native build entry point
+├── MANIFEST.in                  native sources included in source distributions
 ├── README.md                    user-facing overview and status
 ├── docs/
-│   └── architecture.md          design layers and stage boundaries
+│   ├── architecture.md          design layers and stage boundaries
+│   └── native.md                C ABI, loader, and RNG contract
+├── native/
+│   ├── include/specdecode/      stable public C ABI
+│   ├── src/                     C++17 implementation
+│   └── tests/                   dependency-free C and C++ tests
 ├── pyproject.toml               Python package metadata and optional dependencies
 ├── src/specdecode/
 │   ├── __init__.py              public Python API
 │   ├── __main__.py              dependency-free demo
+│   ├── backends.py              backend protocol and Python oracle
 │   ├── cli.py                   toy and real-model command-line interface
 │   ├── config.py                immutable decoding configuration
 │   ├── decoder.py               exact speculative-decoding loop
 │   ├── events.py                typed streaming token events
 │   ├── huggingface.py           optional PyTorch/Transformers adapter
 │   ├── models.py                sequential and batched model protocols
+│   ├── native.py                lazy ctypes loader and native backend
 │   ├── sampling.py              probability and residual-sampling utilities
 │   └── tokenizers.py            compatibility, prompt, and streaming helpers
 └── tests/
@@ -146,6 +163,13 @@ call. Hugging Face execution is currently stateless and uses the full context;
 KV-cache reuse must not be added until rejected proposal suffixes can be rolled
 back safely.
 
+Numerical sampling routes through `SamplingBackend`. Python owns every random
+draw and passes explicit uniforms into either implementation. Native acceptance
+probabilities can be computed for an entire proposal without consuming RNG. A
+backend is selected before generation; native runtime errors must propagate. The
+library API defaults to the stable Python oracle, while the CLI's `auto` mode
+opts into native discovery.
+
 ## Public Python API
 
 The root package exports:
@@ -160,7 +184,10 @@ The root package exports:
 - `ProposalScoringModel` — optional one-call target proposal protocol;
 - `CausalLMProbabilityAdapter` — framework-neutral causal-logit alignment base;
 - `TableModel` — deterministic context table used by tests and the demo;
-- `TokenEvent` — one committed token's ID, output index, and source.
+- `TokenEvent` — one committed token's ID, output index, and source;
+- `SamplingBackend` — deterministic sampling and acceptance operation protocol;
+- `PythonSamplingBackend` — dependency-free correctness oracle;
+- `load_sampling_backend` — explicit or automatic backend selection.
 
 The `ProbabilityModel` contract currently requires:
 
@@ -195,6 +222,14 @@ python3 -m pip install -e '.[transformers]'
 specdecode generate --draft-model DRAFT --target-model TARGET --prompt "Hello"
 ```
 
+Build and test the native core:
+
+```bash
+cmake -S . -B work/native-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build work/native-build --parallel
+ctest --test-dir work/native-build --output-on-failure
+```
+
 Run all tests:
 
 ```bash
@@ -216,9 +251,9 @@ git diff --check
 When optional development dependencies are installed, `pytest` and `ruff` may
 also be used, but standard-library tests must continue to work.
 
-## Test coverage through Stage 2
+## Test coverage through Stage 3
 
-The 29 current tests cover:
+The 41 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -234,7 +269,12 @@ The 29 current tests cover:
 - streaming sources for acceptance, correction, bonus, and fallback;
 - prompt and EOS vocabulary validation;
 - exact tokenizer compatibility, chat encoding, and incremental text decoding;
-- lazy CLI parsing and adapter execution with dependency-free fake components.
+- lazy CLI parsing and adapter execution with dependency-free fake components;
+- automatic fallback and explicit native-loader failures;
+- deterministic RNG draw order owned by the decoder;
+- native/Python categorical, residual, acceptance, event, statistics, and RNG
+  state parity;
+- ABI validation errors, strict acceptance comparison, and public C linkage.
 
 Any change to sampling, verification, scheduling, or fallback behavior must add
 or update tests. Prefer deterministic unit cases for branches and a bounded
@@ -266,11 +306,11 @@ Optional PyTorch/Transformers loading, tokenizer validation, batched target
 verification, streaming events, and the configurable CLI are implemented. Real
 GPU measurements are not part of this stage.
 
-### Stage 3 — C++ native core
+### Stage 3 — C++ native core: complete
 
-Add CMake-based C++ code and Python bindings for vectorized acceptance, residual
-construction, and sampling. Add seeded parity tests against the Python oracle and
-retain a pure-Python fallback when the extension is unavailable.
+The CMake C++17 library, versioned C ABI, `ctypes` bindings, vectorized
+acceptance, native sampling/residual operations, compiled tests, seeded parity,
+and pure-Python fallback are implemented. Native wheel production is deferred.
 
 ### Stage 4 — paged and quantized KV cache
 

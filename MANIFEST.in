@@ -1,0 +1,2 @@
+include CMakeLists.txt
+recursive-include native CMakeLists.txt *.h *.c *.cpp

@@ -7,14 +7,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from numbers import Integral
 
+from .backends import PythonSamplingBackend, SamplingBackend
 from .config import DecodeConfig
 from .events import TokenEvent, TokenSource
 from .models import ProbabilityModel
 from .sampling import (
     DistributionError,
     normalize_probabilities,
-    residual_distribution,
-    sample_categorical,
 )
 
 
@@ -64,8 +63,8 @@ class _DraftWindow:
 class SpeculativeDecoder:
     """Generate tokens with exact speculative sampling.
 
-    This implementation prioritizes clarity and correctness. Target scoring is
-    sequential here; Stage 2 will replace it with a single batched model pass.
+    Target proposal scoring and numerical sampling both have optional optimized
+    backends while retaining dependency-free Python reference paths.
     """
 
     def __init__(
@@ -75,6 +74,7 @@ class SpeculativeDecoder:
         config: DecodeConfig | None = None,
         *,
         rng: random.Random | None = None,
+        sampling_backend: SamplingBackend | None = None,
     ) -> None:
         if draft_model.vocab_size != target_model.vocab_size:
             raise ValueError("draft and target models must share a vocabulary")
@@ -88,6 +88,11 @@ class SpeculativeDecoder:
         ):
             raise ValueError("eos_token_id must be inside the shared vocabulary")
         self.rng = rng or random.Random()
+        self.sampling_backend = (
+            sampling_backend
+            if sampling_backend is not None
+            else PythonSamplingBackend()
+        )
 
     def _probabilities(self, model: ProbabilityModel, context: list[int]) -> tuple[float, ...]:
         return normalize_probabilities(
@@ -96,7 +101,10 @@ class SpeculativeDecoder:
 
     def _target_token(self, context: list[int]) -> int:
         probabilities = self._probabilities(self.target_model, context)
-        return sample_categorical(probabilities, self.rng)
+        return self._sample(probabilities)
+
+    def _sample(self, probabilities: Sequence[float]) -> int:
+        return self.sampling_backend.categorical(probabilities, self.rng.random())
 
     def _target_distributions(
         self,
@@ -166,7 +174,7 @@ class SpeculativeDecoder:
                     q = self._probabilities(self.draft_model, prefix + proposed)
                 except (DistributionError, RuntimeError, ValueError):
                     break
-                token = sample_categorical(q, self.rng)
+                token = self._sample(q)
                 draft_distributions.append(q)
                 proposed.append(token)
                 stats.drafted_tokens += 1
@@ -185,15 +193,23 @@ class SpeculativeDecoder:
             target_distributions = self._target_distributions(prefix, proposed)
             stats.verification_rounds += 1
 
+            acceptance_probabilities = self.sampling_backend.acceptance_probabilities(
+                target_distributions[: len(proposed)],
+                draft_distributions,
+                proposed,
+            )
+            if len(acceptance_probabilities) != len(proposed):
+                raise DistributionError(
+                    "sampling backend returned the wrong number of acceptance probabilities"
+                )
+
             accepted_this_round = 0
             rejected = False
             for index, token in enumerate(proposed):
                 p = target_distributions[index]
                 q = draft_distributions[index]
-                q_token = q[token]
-                acceptance = 1.0 if q_token == 0.0 else min(1.0, p[token] / q_token)
 
-                if self.rng.random() < acceptance:
+                if self.rng.random() < acceptance_probabilities[index]:
                     emit(token, "accepted_draft")
                     stats.accepted_tokens += 1
                     accepted_this_round += 1
@@ -201,8 +217,12 @@ class SpeculativeDecoder:
                         break
                     continue
 
-                correction = residual_distribution(p, q)
-                replacement = sample_categorical(correction, self.rng)
+                correction_weights = self.sampling_backend.residual_weights(p, q)
+                correction = normalize_probabilities(
+                    correction_weights,
+                    expected_size=self.target_model.vocab_size,
+                )
+                replacement = self._sample(correction)
                 emit(replacement, "target_correction")
                 stats.rejected_tokens += 1
                 stats.target_tokens += 1
@@ -219,7 +239,7 @@ class SpeculativeDecoder:
                 continue
 
             # Every draft token was accepted, so emit one target bonus token.
-            bonus = sample_categorical(target_distributions[-1], self.rng)
+            bonus = self._sample(target_distributions[-1])
             emit(bonus, "target_bonus")
             stats.target_tokens += 1
             if bonus == config.eos_token_id:

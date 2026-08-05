@@ -56,6 +56,19 @@ Each committed token can emit a `TokenEvent` whose source is accepted draft,
 target correction, target bonus, or target fallback. Events are fired only after
 the token becomes part of the output.
 
+## Native backend contract
+
+`SpeculativeDecoder` delegates deterministic numerical work through a
+`SamplingBackend`. The Python backend is the oracle. The optional C++ backend is
+loaded through a versioned C ABI and `ctypes`; it provides categorical sampling,
+residual weights, vectorized acceptance probabilities, and first-rejection
+verification.
+
+Randomness always stays in Python. The decoder passes explicit uniform draws to
+the selected backend and stops drawing after the first rejected proposal. This
+preserves seeded draw order across Python and native execution. Backend fallback
+is decided before generation and never hides native execution failures.
+
 ## Stage boundaries
 
 ### Stage 1: Reference engine — complete
@@ -72,11 +85,12 @@ the token becomes part of the output.
 - Token streaming and CLI configuration.
 - Stateless full-context execution; cache reuse remains intentionally deferred.
 
-### Stage 3: Native verification
+### Stage 3: Native verification — complete
 
-- Contiguous probability buffers shared with Python.
-- Vectorized acceptance and residual sampling.
-- Seeded parity tests against Stage 1.
+- Versioned C ABI and contiguous buffers shared through `ctypes`.
+- Vectorized acceptance plus native residual and categorical operations.
+- C/C++ build tests and seeded parity against the Python oracle.
+- Automatic pure-Python fallback when no native library is present.
 
 ### Stage 4: KV memory engine
 

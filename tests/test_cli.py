@@ -26,9 +26,10 @@ class CliTests(unittest.TestCase):
     def test_demo_runs_without_optional_dependencies(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            exit_code = main(["demo", "--seed", "7"])
+            exit_code = main(["demo", "--seed", "7", "--sampling-backend", "python"])
         self.assertEqual(exit_code, 0)
         self.assertIn("generated token ids:", output.getvalue())
+        self.assertIn("sampling backend: python", output.getvalue())
 
     def test_missing_optional_backend_has_actionable_cli_error(self) -> None:
         error_output = io.StringIO()
@@ -50,6 +51,22 @@ class CliTests(unittest.TestCase):
                     main(arguments)
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("install the transformers extra", error_output.getvalue())
+
+    def test_required_native_backend_reports_missing_library(self) -> None:
+        error_output = io.StringIO()
+        with contextlib.redirect_stderr(error_output):
+            with self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "demo",
+                        "--sampling-backend",
+                        "native",
+                        "--native-library",
+                        "/definitely/missing/specdecode.so",
+                    ]
+                )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("native library does not exist", error_output.getvalue())
 
 
 if __name__ == "__main__":

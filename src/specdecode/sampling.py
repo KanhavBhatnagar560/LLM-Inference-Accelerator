@@ -36,10 +36,17 @@ def normalize_probabilities(
     return tuple(value / total for value in normalized)
 
 
-def sample_categorical(probabilities: Sequence[float], rng: random.Random) -> int:
-    """Sample an index from an already-normalized probability vector."""
+def sample_categorical_from_uniform(
+    probabilities: Sequence[float], uniform: float
+) -> int:
+    """Sample from normalized probabilities using an explicit uniform draw."""
 
-    threshold = rng.random()
+    if not math.isfinite(uniform) or not 0.0 <= uniform < 1.0:
+        raise DistributionError("uniform must be finite and in [0, 1)")
+    if not probabilities:
+        raise DistributionError("probability vector cannot be empty")
+
+    threshold = uniform
     cumulative = 0.0
     for index, probability in enumerate(probabilities):
         cumulative += probability
@@ -47,6 +54,12 @@ def sample_categorical(probabilities: Sequence[float], rng: random.Random) -> in
             return index
     # Floating-point addition can leave cumulative infinitesimally below one.
     return len(probabilities) - 1
+
+
+def sample_categorical(probabilities: Sequence[float], rng: random.Random) -> int:
+    """Sample an index from an already-normalized probability vector."""
+
+    return sample_categorical_from_uniform(probabilities, rng.random())
 
 
 def residual_distribution(
@@ -65,4 +78,3 @@ def residual_distribution(
     if math.fsum(residual) <= 1e-15:
         return tuple(target_probabilities)
     return normalize_probabilities(residual)
-
