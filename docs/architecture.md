@@ -35,20 +35,42 @@ CUDA attention, quantization, and stream pipeline
 The Python implementation in `src/specdecode` is the behavioral oracle. Native
 implementations must pass the same seeded scenario tests and statistical tests.
 
+## Model integration contract
+
+Every model implements `next_token_probs(context)`. Targets may also implement
+`score_proposal(prefix, proposal)`, which returns exactly one probability row per
+proposal position plus one row for the target bonus token. The decoder selects
+this batched path when available and otherwise retains the sequential Stage 1
+oracle.
+
+For a prefix of length `L` and `K` proposed tokens, a causal language model is
+run on `prefix + proposal`. Logit positions `L-1` through `L+K-1` produce the
+`K+1` required distributions. The Hugging Face adapter slices those positions,
+converts logits to float32 probabilities, and performs no gradient tracking.
+
+Draft and target tokenizers must have identical token-to-ID and added-token
+mappings plus matching BOS, EOS, PAD, and UNK IDs. Equal vocabulary sizes alone
+are not sufficient.
+
+Each committed token can emit a `TokenEvent` whose source is accepted draft,
+target correction, target bonus, or target fallback. Events are fired only after
+the token becomes part of the output.
+
 ## Stage boundaries
 
-### Stage 1: Reference engine
+### Stage 1: Reference engine — complete
 
 - Model protocol expressed as next-token probability distributions.
 - Exact accept/reject/correction loop.
 - Dynamic proposal window and fallback path.
 - Standard-library-only correctness tests.
 
-### Stage 2: Real models
+### Stage 2: Real models — complete
 
 - A target adapter that verifies a proposal in one batched forward pass.
-- A draft adapter with independent cache state.
+- Lazy PyTorch/Transformers loading with independent device placement.
 - Token streaming and CLI configuration.
+- Stateless full-context execution; cache reuse remains intentionally deferred.
 
 ### Stage 3: Native verification
 
@@ -67,4 +89,3 @@ implementations must pass the same seeded scenario tests and statistical tests.
 - Separate draft, target, and transfer streams with explicit events.
 - Pinned host memory and reusable device workspaces.
 - Warmup, throughput, latency-percentile, memory, and accuracy harnesses.
-

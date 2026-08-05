@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from numbers import Integral
 
 from .config import DecodeConfig
+from .events import TokenEvent, TokenSource
 from .models import ProbabilityModel
 from .sampling import (
     DistributionError,
@@ -75,9 +78,15 @@ class SpeculativeDecoder:
     ) -> None:
         if draft_model.vocab_size != target_model.vocab_size:
             raise ValueError("draft and target models must share a vocabulary")
+        if draft_model.vocab_size < 1:
+            raise ValueError("model vocabulary must be positive")
         self.draft_model = draft_model
         self.target_model = target_model
         self.config = config or DecodeConfig()
+        if self.config.eos_token_id is not None and not (
+            0 <= self.config.eos_token_id < target_model.vocab_size
+        ):
+            raise ValueError("eos_token_id must be inside the shared vocabulary")
         self.rng = rng or random.Random()
 
     def _probabilities(self, model: ProbabilityModel, context: list[int]) -> tuple[float, ...]:
@@ -89,12 +98,55 @@ class SpeculativeDecoder:
         probabilities = self._probabilities(self.target_model, context)
         return sample_categorical(probabilities, self.rng)
 
-    def generate(self, prompt_tokens: list[int] | tuple[int, ...]) -> DecodeResult:
+    def _target_distributions(
+        self,
+        prefix: list[int],
+        proposed: list[int],
+    ) -> list[tuple[float, ...]]:
+        scorer = getattr(self.target_model, "score_proposal", None)
+        if callable(scorer):
+            rows = scorer(prefix, proposed)
+        else:
+            rows = [
+                self.target_model.next_token_probs(prefix + proposed[:index])
+                for index in range(len(proposed) + 1)
+            ]
+        if len(rows) != len(proposed) + 1:
+            raise DistributionError(
+                "proposal scorer must return one row per proposal plus one bonus row"
+            )
+        return [
+            normalize_probabilities(row, expected_size=self.target_model.vocab_size)
+            for row in rows
+        ]
+
+    def _validate_prompt(self, prompt_tokens: Sequence[int]) -> tuple[int, ...]:
+        prompt: list[int] = []
+        for token in prompt_tokens:
+            if isinstance(token, bool) or not isinstance(token, Integral):
+                raise TypeError("prompt token IDs must be integers")
+            token_id = int(token)
+            if not 0 <= token_id < self.target_model.vocab_size:
+                raise ValueError("prompt token ID is outside the shared vocabulary")
+            prompt.append(token_id)
+        return tuple(prompt)
+
+    def generate(
+        self,
+        prompt_tokens: Sequence[int],
+        *,
+        on_token: Callable[[TokenEvent], None] | None = None,
+    ) -> DecodeResult:
         config = self.config
-        prompt = tuple(prompt_tokens)
+        prompt = self._validate_prompt(prompt_tokens)
         generated: list[int] = []
         stats = DecodeStats()
         window = _DraftWindow(config)
+
+        def emit(token: int, source: TokenSource) -> None:
+            generated.append(token)
+            if on_token is not None:
+                on_token(TokenEvent(token_id=token, index=len(generated) - 1, source=source))
 
         if config.max_new_tokens == 0:
             return DecodeResult(prompt, (), stats)
@@ -123,19 +175,14 @@ class SpeculativeDecoder:
 
             if not proposed:
                 token = self._target_token(prefix)
-                generated.append(token)
+                emit(token, "target_fallback")
                 stats.target_tokens += 1
                 stats.fallback_steps += 1
                 if token == config.eos_token_id:
                     break
                 continue
 
-            # The reference evaluates each prefix independently. A tensor model
-            # adapter can batch these contexts without changing this contract.
-            target_distributions = [
-                self._probabilities(self.target_model, prefix + proposed[:index])
-                for index in range(len(proposed) + 1)
-            ]
+            target_distributions = self._target_distributions(prefix, proposed)
             stats.verification_rounds += 1
 
             accepted_this_round = 0
@@ -146,8 +193,8 @@ class SpeculativeDecoder:
                 q_token = q[token]
                 acceptance = 1.0 if q_token == 0.0 else min(1.0, p[token] / q_token)
 
-                if self.rng.random() <= acceptance:
-                    generated.append(token)
+                if self.rng.random() < acceptance:
+                    emit(token, "accepted_draft")
                     stats.accepted_tokens += 1
                     accepted_this_round += 1
                     if token == config.eos_token_id or len(generated) == config.max_new_tokens:
@@ -156,7 +203,7 @@ class SpeculativeDecoder:
 
                 correction = residual_distribution(p, q)
                 replacement = sample_categorical(correction, self.rng)
-                generated.append(replacement)
+                emit(replacement, "target_correction")
                 stats.rejected_tokens += 1
                 stats.target_tokens += 1
                 rejected = True
@@ -173,10 +220,9 @@ class SpeculativeDecoder:
 
             # Every draft token was accepted, so emit one target bonus token.
             bonus = sample_categorical(target_distributions[-1], self.rng)
-            generated.append(bonus)
+            emit(bonus, "target_bonus")
             stats.target_tokens += 1
             if bonus == config.eos_token_id:
                 break
 
         return DecodeResult(prompt, tuple(generated), stats)
-

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-inference-accelerator"
-version = "0.1.0"
+version = "0.2.0"
 description = "An exact speculative-decoding engine with C++ and CUDA acceleration"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,10 +14,10 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
-transformers = ["torch>=2.3", "transformers>=4.44", "accelerate>=0.33"]
+transformers = ["torch>=2.3", "transformers>=4.44,<6", "accelerate>=0.33"]
 
 [project.scripts]
-specdecode = "specdecode.__main__:main"
+specdecode = "specdecode.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -32,4 +32,3 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-

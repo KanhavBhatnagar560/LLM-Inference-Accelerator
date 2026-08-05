@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from abc import ABC, abstractmethod
 from typing import Protocol, runtime_checkable
 
 
@@ -18,6 +19,74 @@ class ProbabilityModel(Protocol):
     def vocab_size(self) -> int: ...
 
     def next_token_probs(self, token_ids: Sequence[int]) -> Sequence[float]: ...
+
+
+@runtime_checkable
+class ProposalScoringModel(ProbabilityModel, Protocol):
+    """Optional fast path for scoring a complete proposal in one call.
+
+    The result contains ``len(proposal) + 1`` probability rows. Row ``i``
+    predicts the token after ``prefix + proposal[:i]``; the final row is the
+    target bonus-token distribution.
+    """
+
+    def score_proposal(
+        self,
+        prefix: Sequence[int],
+        proposal: Sequence[int],
+    ) -> Sequence[Sequence[float]]: ...
+
+
+class CausalLMProbabilityAdapter(ABC):
+    """Turns causal-LM logit positions into the probability model protocol.
+
+    Backends implement one method that evaluates a token sequence and returns
+    probabilities only for requested logit positions. Keeping position
+    selection here makes the off-by-one-sensitive proposal alignment testable
+    without importing a tensor framework.
+    """
+
+    def __init__(self, vocab_size: int) -> None:
+        if vocab_size < 1:
+            raise ValueError("vocab_size must be positive")
+        self._vocab_size = vocab_size
+
+    @property
+    def vocab_size(self) -> int:
+        return self._vocab_size
+
+    @abstractmethod
+    def _probabilities_at_positions(
+        self,
+        token_ids: Sequence[int],
+        positions: Sequence[int],
+    ) -> Sequence[Sequence[float]]:
+        """Run the backend once and return rows for zero-based logit positions."""
+
+    def next_token_probs(self, token_ids: Sequence[int]) -> Sequence[float]:
+        if not token_ids:
+            raise ValueError("a causal language model requires a non-empty context")
+        rows = self._probabilities_at_positions(token_ids, (len(token_ids) - 1,))
+        if len(rows) != 1:
+            raise ValueError("backend must return one probability row for one position")
+        return rows[0]
+
+    def score_proposal(
+        self,
+        prefix: Sequence[int],
+        proposal: Sequence[int],
+    ) -> Sequence[Sequence[float]]:
+        if not prefix:
+            raise ValueError("a causal language model requires a non-empty prefix")
+        combined = tuple(prefix) + tuple(proposal)
+        # A causal LM's logits at position n predict the token at position n+1.
+        # Therefore L-1 verifies the first proposal token and L+K-1 predicts
+        # the bonus after K proposals.
+        positions = tuple(range(len(prefix) - 1, len(combined)))
+        rows = self._probabilities_at_positions(combined, positions)
+        if len(rows) != len(proposal) + 1:
+            raise ValueError("backend returned the wrong number of proposal rows")
+        return rows
 
 
 class TableModel:
@@ -51,4 +120,3 @@ class TableModel:
         if context and (context[-1],) in self._table:
             return self._table[(context[-1],)]
         return self._default
-

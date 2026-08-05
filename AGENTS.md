@@ -23,14 +23,9 @@ the Python reference engine's behavior and output distribution.
 
 ## Current repository state
 
-The current baseline is Stage 1, introduced by commit `fed5890`:
-
-```text
-feat: add exact speculative decoding reference
-```
-
-Stage 1 is a dependency-free Python correctness implementation. It does not yet
-load real language models and does not contain C++ or CUDA kernels.
+Stages 1 and 2 are implemented. The dependency-free Python correctness engine is
+still the oracle, and an optional Hugging Face/PyTorch adapter now connects it to
+real causal language models. The repository does not yet contain C++ or CUDA.
 
 Implemented:
 
@@ -43,14 +38,18 @@ Implemented:
 - EOS and maximum-new-token handling;
 - seeded deterministic tests;
 - a 20,000-sample empirical distribution-equivalence test;
-- a small executable toy-model demonstration.
+- a small executable toy-model demonstration;
+- an optional one-forward-pass target proposal-scoring interface;
+- a lazy `AutoModelForCausalLM` adapter using inference mode and float32 softmax;
+- exact draft/target tokenizer and model-vocabulary validation;
+- prompt and optional chat-template encoding;
+- token callbacks identifying accepted, corrected, bonus, and fallback output;
+- a configurable real-model CLI with independent model devices and revisions.
 
 Not implemented yet:
 
-- Hugging Face or PyTorch model adapters;
-- tokenizer or text input/output support;
-- Llama-8B or a 1B draft-model integration;
-- streaming generation callbacks or an HTTP server;
+- an HTTP or production serving layer;
+- KV-cache reuse and rejected-suffix cache rollback;
 - C++, Python bindings, CUDA, PagedAttention, or INT8 KV-cache code;
 - GPU benchmark and profiling infrastructure;
 - validated performance numbers on NVIDIA hardware.
@@ -69,13 +68,20 @@ Do not describe a planned feature or target metric as completed.
 ├── src/specdecode/
 │   ├── __init__.py              public Python API
 │   ├── __main__.py              dependency-free demo
+│   ├── cli.py                   toy and real-model command-line interface
 │   ├── config.py                immutable decoding configuration
 │   ├── decoder.py               exact speculative-decoding loop
-│   ├── models.py                model protocol and table-backed test model
-│   └── sampling.py              probability and residual-sampling utilities
+│   ├── events.py                typed streaming token events
+│   ├── huggingface.py           optional PyTorch/Transformers adapter
+│   ├── models.py                sequential and batched model protocols
+│   ├── sampling.py              probability and residual-sampling utilities
+│   └── tokenizers.py            compatibility, prompt, and streaming helpers
 └── tests/
+    ├── test_batched_scoring.py  causal-logit alignment and dispatch tests
     ├── test_decoder.py          decoder correctness and distribution tests
-    └── test_sampling.py         sampling utility tests
+    ├── test_huggingface.py      dependency-free adapter component test
+    ├── test_streaming.py        event and prompt validation tests
+    └── ...                      CLI, tokenizer, and sampling tests
 ```
 
 `work/` and `outputs/` are local workspace folders and are intentionally ignored
@@ -134,9 +140,11 @@ The following are non-negotiable invariants:
 7. Adjust the next draft-window size using the round's acceptance result.
 8. Stop on EOS or the maximum generation length.
 
-The Stage 1 target evaluations are sequential for readability. A real tensor
-adapter should compute the proposal-position logits in one batched target-model
-forward pass without changing the decoder's mathematical contract.
+The sequential Stage 1 path remains available. A target implementing
+`score_proposal()` evaluates all proposal positions and the bonus position in one
+call. Hugging Face execution is currently stateless and uses the full context;
+KV-cache reuse must not be added until rejected proposal suffixes can be rolled
+back safely.
 
 ## Public Python API
 
@@ -149,7 +157,10 @@ The root package exports:
 - `DecodeStats` — drafted, accepted, rejected, target-sampled, verification, and
   fallback counters;
 - `ProbabilityModel` — minimal next-token probability protocol;
-- `TableModel` — deterministic context table used by tests and the demo.
+- `ProposalScoringModel` — optional one-call target proposal protocol;
+- `CausalLMProbabilityAdapter` — framework-neutral causal-logit alignment base;
+- `TableModel` — deterministic context table used by tests and the demo;
+- `TokenEvent` — one committed token's ID, output index, and source.
 
 The `ProbabilityModel` contract currently requires:
 
@@ -158,8 +169,13 @@ vocab_size: int
 next_token_probs(token_ids: Sequence[int]) -> Sequence[float]
 ```
 
-Future adapters may add a batched sequence-scoring method, but they must preserve
-this simple reference path for testing.
+Targets may additionally implement:
+
+```python
+score_proposal(prefix, proposal) -> Sequence[Sequence[float]]
+```
+
+It returns `len(proposal) + 1` rows and must preserve the simple reference path.
 
 ## Development commands
 
@@ -169,7 +185,14 @@ packages.
 Run the demo:
 
 ```bash
-PYTHONPATH=src python3 -m specdecode
+PYTHONPATH=src python3 -m specdecode demo
+```
+
+Install and run real-model support:
+
+```bash
+python3 -m pip install -e '.[transformers]'
+specdecode generate --draft-model DRAFT --target-model TARGET --prompt "Hello"
 ```
 
 Run all tests:
@@ -193,9 +216,9 @@ git diff --check
 When optional development dependencies are installed, `pytest` and `ruff` may
 also be used, but standard-library tests must continue to work.
 
-## Test coverage in Stage 1
+## Test coverage through Stage 2
 
-The nine current tests cover:
+The 29 current tests cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -205,7 +228,13 @@ The nine current tests cover:
 - forced rejection and residual replacement;
 - fallback after a simulated draft-model failure;
 - strict maximum generation length;
-- empirical agreement with a target distribution over 20,000 samples.
+- empirical agreement with a target distribution over 20,000 samples;
+- causal-logit position alignment and single-call proposal scoring;
+- malformed batched target output rejection;
+- streaming sources for acceptance, correction, bonus, and fallback;
+- prompt and EOS vocabulary validation;
+- exact tokenizer compatibility, chat encoding, and incremental text decoding;
+- lazy CLI parsing and adapter execution with dependency-free fake components.
 
 Any change to sampling, verification, scheduling, or fallback behavior must add
 or update tests. Prefer deterministic unit cases for branches and a bounded
@@ -231,11 +260,11 @@ statistical test for distribution-level behavior.
 
 The current repository provides the behavioral oracle and test suite.
 
-### Stage 2 — real model integration
+### Stage 2 — real model integration: complete
 
-Add optional PyTorch/Transformers dependencies, Hugging Face causal-LM adapters,
-shared-tokenizer validation, batched target verification, streaming token events,
-and a configurable CLI. Keep toy-model tests runnable without these dependencies.
+Optional PyTorch/Transformers loading, tokenizer validation, batched target
+verification, streaming events, and the configurable CLI are implemented. Real
+GPU measurements are not part of this stage.
 
 ### Stage 3 — C++ native core
 
@@ -317,4 +346,3 @@ The project is complete only when:
 - benchmark scripts reproduce throughput, memory, batch-size, and latency claims;
 - setup and benchmark instructions work from a clean checkout;
 - all tests, builds, and documentation checks pass.
-

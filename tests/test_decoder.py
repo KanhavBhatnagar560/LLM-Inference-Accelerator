@@ -11,6 +11,11 @@ class BrokenDraft:
         raise RuntimeError("simulated draft failure")
 
 
+class ZeroRandom(random.Random):
+    def random(self):
+        return 0.0
+
+
 class DecoderTests(unittest.TestCase):
     def test_identical_models_accept_and_stop_at_eos(self) -> None:
         model = TableModel(
@@ -45,6 +50,19 @@ class DecoderTests(unittest.TestCase):
         self.assertEqual(result.generated_tokens, (1,))
         self.assertEqual(result.stats.rejected_tokens, 1)
         self.assertEqual(result.stats.target_tokens, 1)
+
+    def test_zero_acceptance_is_rejected_when_rng_returns_zero(self) -> None:
+        decoder = SpeculativeDecoder(
+            TableModel({}, default=(1.0, 0.0)),
+            TableModel({}, default=(0.0, 1.0)),
+            DecodeConfig(max_new_tokens=1, initial_draft_tokens=1),
+            rng=ZeroRandom(),
+        )
+
+        result = decoder.generate([])
+
+        self.assertEqual(result.generated_tokens, (1,))
+        self.assertEqual(result.stats.rejected_tokens, 1)
 
     def test_broken_draft_falls_back_to_target(self) -> None:
         target = TableModel({}, default=(0.0, 1.0))
@@ -90,4 +108,3 @@ class DecoderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
