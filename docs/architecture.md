@@ -25,9 +25,9 @@ the probability law, because it only changes how many proposals are attempted.
 ```text
 CLI / benchmark harness
         |
-Python orchestration and model adapters
+Python orchestration, model adapters, and paged cache oracle
         |
-C++ verification, sampling, and cache allocator
+C++ verification, sampling, and INT8 quantization
         |
 CUDA attention, quantization, and stream pipeline
 ```
@@ -69,6 +69,18 @@ the selected backend and stops drawing after the first rejected proposal. This
 preserves seeded draw order across Python and native execution. Backend fallback
 is decided before generation and never hides native execution failures.
 
+## KV memory contract
+
+`PagedKVCache` owns a fixed physical block pool and one logical block table per
+sequence. Multi-token append is atomic, checkpoints record a committed length,
+and rollback clears rejected suffix entries before reclaiming unused blocks.
+
+Each key and value head is quantized independently with a symmetric INT8 scale.
+`PythonKVQuantizer` is the numerical oracle and `NativeKVQuantizer` exposes the
+matching C++ CPU kernels. The dequantization error bound and format-level byte
+formulas are documented in `docs/kv-cache.md`. This standalone cache is not yet
+connected to Hugging Face model state or CUDA attention.
+
 ## Stage boundaries
 
 ### Stage 1: Reference engine — complete
@@ -92,11 +104,12 @@ is decided before generation and never hides native execution failures.
 - C/C++ build tests and seeded parity against the Python oracle.
 - Automatic pure-Python fallback when no native library is present.
 
-### Stage 4: KV memory engine
+### Stage 4: KV memory engine — complete
 
-- Fixed-size logical/physical block table.
-- Per-head or per-channel INT8 scale metadata.
-- Reference dequantization and attention parity thresholds.
+- Fixed-size logical/physical block tables with deterministic reclamation.
+- Atomic speculative appends, checkpoints, suffix rollback, and invariants.
+- Per-head symmetric INT8 scale metadata and Python/native CPU kernels.
+- Reference dequantization, error-bound tests, and memory accounting.
 
 ### Stage 5: CUDA and measurement
 

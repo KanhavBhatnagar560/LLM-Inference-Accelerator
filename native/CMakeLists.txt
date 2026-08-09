@@ -8,7 +8,7 @@ set_target_properties(
         CXX_EXTENSIONS OFF
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN YES
-        VERSION 1.0.0
+        VERSION 1.1.0
         SOVERSION 1
 )
 

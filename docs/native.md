@@ -1,8 +1,9 @@
-# Native sampling core
+# Native numerical core
 
-Stage 3 adds a dependency-free C++17 shared library and lazy Python `ctypes`
-bindings. It accelerates small numerical operations around speculative decoding;
-it does not replace model execution or establish an end-to-end speedup claim.
+Stages 3 and 4 provide a dependency-free C++17 shared library and lazy Python
+`ctypes` bindings. It accelerates small numerical operations around speculative
+decoding and supplies CPU INT8 quantization kernels; it does not replace model
+execution or establish an end-to-end speedup claim.
 
 ## Build and test
 
@@ -39,13 +40,15 @@ silently changing backends during a generation.
 
 ## Stable C ABI
 
-The public header is `native/include/specdecode/native.h`. ABI version 1 exposes:
+The public header is `native/include/specdecode/native.h`. ABI revision 1.1
+exposes:
 
 - probability normalization;
 - categorical sampling from an explicit uniform draw;
 - residual-weight construction;
 - vectorized acceptance probabilities over proposal rows;
 - first-rejection detection from explicit uniforms;
+- symmetric INT8 quantization and dequantization;
 - stable status codes and status messages.
 
 The functions accept caller-owned buffers and never return allocated memory. All
@@ -79,3 +82,6 @@ The source distribution includes the CMake and native source files, but the
 setuptools wheel does not compile or bundle the shared library yet. Platform
 wheel production belongs to a later packaging milestone. Pure Python remains the
 default safe fallback for installations without a compiled library.
+
+See [kv-cache.md](kv-cache.md) for the quantization formula, error bound, paged
+allocator, and memory-accounting contract.

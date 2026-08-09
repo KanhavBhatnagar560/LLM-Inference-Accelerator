@@ -4,8 +4,10 @@ import unittest
 
 from specdecode import DecodeConfig, SpeculativeDecoder, TableModel
 from specdecode.backends import PythonSamplingBackend
+from specdecode.kv_cache import KVCacheConfig, PagedKVCache, PythonKVQuantizer
 from specdecode.native import (
     NativeBackendError,
+    NativeKVQuantizer,
     NativeLibraryNotFound,
     NativeSamplingBackend,
 )
@@ -27,6 +29,8 @@ class NativeParityTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.native = NATIVE
         cls.python = PythonSamplingBackend()
+        cls.native_quantizer = NativeKVQuantizer.load()
+        cls.python_quantizer = PythonKVQuantizer()
 
     def assertVectorClose(self, left, right, tolerance=1.0e-12):
         self.assertEqual(len(left), len(right))
@@ -118,6 +122,51 @@ class NativeParityTests(unittest.TestCase):
         self.assertEqual(native_result, python_result)
         self.assertEqual(native_events, python_events)
         self.assertEqual(native_rng.getstate(), python_rng.getstate())
+
+    def test_int8_quantization_and_dequantization_match_python(self) -> None:
+        vectors = (
+            (-1.0, -0.5, 0.0, 0.5, 1.0),
+            (0.0, 0.0, 0.0),
+            (0.001, -12.5, 3.25, 99.0),
+        )
+        for vector in vectors:
+            with self.subTest(vector=vector):
+                expected = self.python_quantizer.quantize(vector)
+                actual = self.native_quantizer.quantize(vector)
+                self.assertEqual(actual, expected)
+                self.assertEqual(
+                    self.native_quantizer.dequantize(actual),
+                    self.python_quantizer.dequantize(expected),
+                )
+
+    def test_native_quantizer_drives_paged_cache_with_reference_parity(self) -> None:
+        config = KVCacheConfig(1, 2, 4, block_size=2, num_blocks=2)
+        keys = (((-1.0, -0.5, 0.5, 1.0), (2.0, 3.0, 4.0, 5.0)),)
+        values = (((0.1, 0.2, 0.3, 0.4), (-3.0, -2.0, -1.0, 0.0)),)
+        python_cache = PagedKVCache(config, quantizer=self.python_quantizer)
+        native_cache = PagedKVCache(config, quantizer=self.native_quantizer)
+        python_cache.create_sequence("request")
+        native_cache.create_sequence("request")
+
+        python_cache.append("request", keys, values)
+        native_cache.append("request", keys, values)
+
+        self.assertEqual(
+            native_cache.read_quantized_token("request", 0),
+            python_cache.read_quantized_token("request", 0),
+        )
+        self.assertEqual(
+            native_cache.read_token("request", 0),
+            python_cache.read_token("request", 0),
+        )
+
+    def test_native_quantizer_validation_errors_are_not_hidden(self) -> None:
+        with self.assertRaises(NativeBackendError):
+            self.native_quantizer.quantize(())
+        with self.assertRaises(NativeBackendError):
+            self.native_quantizer.quantize((math.nan,))
+        with self.assertRaises(TypeError):
+            self.native_quantizer.quantize((True,))
 
 
 if __name__ == "__main__":

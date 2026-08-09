@@ -23,10 +23,10 @@ the Python reference engine's behavior and output distribution.
 
 ## Current repository state
 
-Stages 1 through 3 are implemented. The dependency-free Python engine remains the
-oracle, the Hugging Face adapter connects real causal models, and an optional
-C++17 shared library handles sampling and vectorized verification. CUDA is not
-implemented.
+Stages 1 through 4 are implemented. The dependency-free Python engine remains the
+oracle, the Hugging Face adapter connects real causal models, a paged cache
+reference manages quantized K/V entries, and an optional C++17 shared library
+handles sampling, verification, and INT8 quantization. CUDA is not implemented.
 
 Implemented:
 
@@ -51,13 +51,20 @@ Implemented:
   acceptance probabilities, and first-rejection detection;
 - lazy `ctypes` bindings with `auto`, `python`, and `native` selection modes;
 - exact RNG ownership in Python and seeded Python/native parity tests;
-- dependency-free C++ tests and a plain-C public-header test.
+- dependency-free C++ tests and a plain-C public-header test;
+- fixed-pool logical-to-physical KV block tables;
+- deterministic block allocation, reclamation, and allocator invariants;
+- atomic multi-token cache appends and speculative-suffix rollback;
+- per-head symmetric INT8 quantization with Python and C++ implementations;
+- reference dequantization with documented error bounds;
+- used, allocated, capacity, FP32-equivalent, and block-table memory accounting.
 
 Not implemented yet:
 
 - an HTTP or production serving layer;
-- KV-cache reuse and rejected-suffix cache rollback;
-- CUDA, PagedAttention, or INT8 KV-cache code;
+- Hugging Face `past_key_values` reuse and cache integration;
+- CUDA PagedAttention, quantization, and stream-execution kernels;
+- shared-prefix cache blocks and copy-on-write serving optimizations;
 - platform-specific native wheel production;
 - GPU benchmark and profiling infrastructure;
 - validated performance numbers on NVIDIA hardware.
@@ -74,7 +81,8 @@ Do not describe a planned feature or target metric as completed.
 ├── README.md                    user-facing overview and status
 ├── docs/
 │   ├── architecture.md          design layers and stage boundaries
-│   └── native.md                C ABI, loader, and RNG contract
+│   ├── kv-cache.md              paging, quantization, and memory contract
+│   └── native.md                C ABI, loader, RNG, and native-kernel contract
 ├── native/
 │   ├── include/specdecode/      stable public C ABI
 │   ├── src/                     C++17 implementation
@@ -89,6 +97,7 @@ Do not describe a planned feature or target metric as completed.
 │   ├── decoder.py               exact speculative-decoding loop
 │   ├── events.py                typed streaming token events
 │   ├── huggingface.py           optional PyTorch/Transformers adapter
+│   ├── kv_cache.py              paged INT8 KV-cache correctness engine
 │   ├── models.py                sequential and batched model protocols
 │   ├── native.py                lazy ctypes loader and native backend
 │   ├── sampling.py              probability and residual-sampling utilities
@@ -97,6 +106,7 @@ Do not describe a planned feature or target metric as completed.
     ├── test_batched_scoring.py  causal-logit alignment and dispatch tests
     ├── test_decoder.py          decoder correctness and distribution tests
     ├── test_huggingface.py      dependency-free adapter component test
+    ├── test_kv_cache.py         paging, rollback, quantization, accounting tests
     ├── test_streaming.py        event and prompt validation tests
     └── ...                      CLI, tokenizer, and sampling tests
 ```
@@ -159,9 +169,9 @@ The following are non-negotiable invariants:
 
 The sequential Stage 1 path remains available. A target implementing
 `score_proposal()` evaluates all proposal positions and the bonus position in one
-call. Hugging Face execution is currently stateless and uses the full context;
-KV-cache reuse must not be added until rejected proposal suffixes can be rolled
-back safely.
+call. Hugging Face execution is currently stateless and uses the full context.
+The standalone Stage 4 cache can roll back rejected proposal suffixes, but model
+cache integration remains deferred until the CUDA execution stage.
 
 Numerical sampling routes through `SamplingBackend`. Python owns every random
 draw and passes explicit uniforms into either implementation. Native acceptance
@@ -187,7 +197,14 @@ The root package exports:
 - `TokenEvent` — one committed token's ID, output index, and source;
 - `SamplingBackend` — deterministic sampling and acceptance operation protocol;
 - `PythonSamplingBackend` — dependency-free correctness oracle;
-- `load_sampling_backend` — explicit or automatic backend selection.
+- `load_sampling_backend` — explicit or automatic backend selection;
+- `KVCacheConfig` — model shape and physical block-pool configuration;
+- `PagedKVCache` — logical block tables, quantized storage, and rollback;
+- `KVCacheCheckpoint` and `KVCacheStats` — rollback and accounting records;
+- `KVQuantizer` and `PythonKVQuantizer` — injectable quantization contract and
+  dependency-free oracle;
+- `QuantizedVector`, `QuantizedKVToken`, and `DequantizedKVToken` — immutable
+  cache data records.
 
 The `ProbabilityModel` contract currently requires:
 
@@ -251,9 +268,9 @@ git diff --check
 When optional development dependencies are installed, `pytest` and `ruff` may
 also be used, but standard-library tests must continue to work.
 
-## Test coverage through Stage 3
+## Test coverage through Stage 4
 
-The 41 current Python tests plus two CTest executables cover:
+The 56 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -274,7 +291,12 @@ The 41 current Python tests plus two CTest executables cover:
 - deterministic RNG draw order owned by the decoder;
 - native/Python categorical, residual, acceptance, event, statistics, and RNG
   state parity;
-- ABI validation errors, strict acceptance comparison, and public C linkage.
+- ABI validation errors, strict acceptance comparison, and public C linkage;
+- logical-to-physical KV block mapping and deterministic block reuse;
+- atomic capacity/shape failures and speculative checkpoint rollback;
+- per-head INT8 scale metadata and dequantization error bounds;
+- Python/native quantization, dequantization, and paged-cache parity;
+- used-versus-allocated compact-format memory accounting.
 
 Any change to sampling, verification, scheduling, or fallback behavior must add
 or update tests. Prefer deterministic unit cases for branches and a bounded
@@ -312,12 +334,13 @@ The CMake C++17 library, versioned C ABI, `ctypes` bindings, vectorized
 acceptance, native sampling/residual operations, compiled tests, seeded parity,
 and pure-Python fallback are implemented. Native wheel production is deferred.
 
-### Stage 4 — paged and quantized KV cache
+### Stage 4 — paged and quantized KV cache: complete
 
-Implement logical-to-physical KV block tables, block allocation/reclamation,
-INT8 quantization metadata and kernels, reference dequantization, memory accounting,
-and numerical parity tests. Quantization scales and error tolerances must be
-documented.
+The dependency-free paged cache implements logical-to-physical block tables,
+deterministic allocation/reclamation, atomic append and suffix rollback, per-head
+INT8 metadata, Python and native CPU quantization kernels, reference
+dequantization, format-level memory accounting, and numerical parity tests.
+Hugging Face and CUDA cache integration remains Stage 5 work.
 
 ### Stage 5 — CUDA execution and benchmarking
 

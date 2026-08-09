@@ -132,5 +132,62 @@ int main() {
         ) == SD_STATUS_OVERFLOW
     );
 
+    const double kv_values[] = {-1.0, -0.5, 0.0, 0.5, 1.0};
+    int8_t quantized[] = {9, 9, 9, 9, 9};
+    double scale = -1.0;
+    assert(
+        sd_quantize_symmetric_int8_f64(kv_values, 5, quantized, &scale) ==
+        SD_STATUS_OK
+    );
+    assert(close(scale, static_cast<double>(static_cast<float>(1.0 / 127.0))));
+    assert(quantized[0] == -127);
+    assert(quantized[1] == -64);
+    assert(quantized[2] == 0);
+    assert(quantized[3] == 64);
+    assert(quantized[4] == 127);
+
+    double dequantized[] = {9.0, 9.0, 9.0, 9.0, 9.0};
+    assert(
+        sd_dequantize_symmetric_int8_f64(quantized, 5, scale, dequantized) ==
+        SD_STATUS_OK
+    );
+    for (size_t index = 0; index < 5; ++index) {
+        assert(std::abs(kv_values[index] - dequantized[index]) <= scale / 2.0 + 1.0e-15);
+    }
+
+    const double zero_kv[] = {0.0, 0.0};
+    int8_t zero_quantized[] = {9, 9};
+    assert(
+        sd_quantize_symmetric_int8_f64(zero_kv, 2, zero_quantized, &scale) ==
+        SD_STATUS_OK
+    );
+    assert(scale == 0.0);
+    assert(zero_quantized[0] == 0 && zero_quantized[1] == 0);
+
+    const double invalid_kv[] = {1.0, std::numeric_limits<double>::quiet_NaN()};
+    int8_t untouched_quantized[] = {7, 8};
+    scale = 9.0;
+    assert(
+        sd_quantize_symmetric_int8_f64(
+            invalid_kv, 2, untouched_quantized, &scale
+        ) == SD_STATUS_NONFINITE_VALUE
+    );
+    assert(untouched_quantized[0] == 7 && untouched_quantized[1] == 8);
+    assert(scale == 9.0);
+
+    const int8_t invalid_zero_scale[] = {1};
+    double untouched_dequantized[] = {8.0};
+    assert(
+        sd_dequantize_symmetric_int8_f64(
+            invalid_zero_scale, 1, 0.0, untouched_dequantized
+        ) == SD_STATUS_INVALID_SCALE
+    );
+    assert(untouched_dequantized[0] == 8.0);
+    assert(
+        sd_dequantize_symmetric_int8_f64(
+            invalid_zero_scale, 1, -1.0, untouched_dequantized
+        ) == SD_STATUS_INVALID_SCALE
+    );
+
     return 0;
 }

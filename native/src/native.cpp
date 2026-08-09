@@ -75,6 +75,8 @@ const char* sd_status_string(const sd_status_t status) {
             return "size overflow";
         case SD_STATUS_INTERNAL_ERROR:
             return "internal error";
+        case SD_STATUS_INVALID_SCALE:
+            return "quantization scale must be finite and non-negative";
     }
     return "unknown status";
 }
@@ -264,6 +266,86 @@ sd_status_t sd_first_rejection_f64(
         }
         *output_accepted_count = proposal_count;
         *output_rejection_index = proposal_count;
+        return SD_STATUS_OK;
+    } catch (...) {
+        return SD_STATUS_INTERNAL_ERROR;
+    }
+}
+
+sd_status_t sd_quantize_symmetric_int8_f64(
+    const double* values,
+    const size_t count,
+    int8_t* output_values,
+    double* output_scale
+) {
+    try {
+        if (values == nullptr || output_values == nullptr || output_scale == nullptr) {
+            return SD_STATUS_NULL_ARGUMENT;
+        }
+        if (count == 0) {
+            return SD_STATUS_INVALID_SIZE;
+        }
+
+        double maximum = 0.0;
+        for (size_t index = 0; index < count; ++index) {
+            if (!std::isfinite(values[index])) {
+                return SD_STATUS_NONFINITE_VALUE;
+            }
+            maximum = std::max(maximum, std::abs(values[index]));
+        }
+
+        if (maximum == 0.0) {
+            for (size_t index = 0; index < count; ++index) {
+                output_values[index] = INT8_C(0);
+            }
+            *output_scale = 0.0;
+            return SD_STATUS_OK;
+        }
+
+        const float float_scale = static_cast<float>(maximum / 127.0);
+        if (!std::isfinite(float_scale) || float_scale == 0.0F) {
+            return SD_STATUS_INVALID_SCALE;
+        }
+        const double scale = static_cast<double>(float_scale);
+        for (size_t index = 0; index < count; ++index) {
+            const double rounded = std::round(values[index] / scale);
+            const double clamped = std::max(-127.0, std::min(127.0, rounded));
+            output_values[index] = static_cast<int8_t>(clamped);
+        }
+        *output_scale = scale;
+        return SD_STATUS_OK;
+    } catch (...) {
+        return SD_STATUS_INTERNAL_ERROR;
+    }
+}
+
+sd_status_t sd_dequantize_symmetric_int8_f64(
+    const int8_t* values,
+    const size_t count,
+    const double scale,
+    double* output_values
+) {
+    try {
+        if (values == nullptr || output_values == nullptr) {
+            return SD_STATUS_NULL_ARGUMENT;
+        }
+        if (count == 0) {
+            return SD_STATUS_INVALID_SIZE;
+        }
+        if (!std::isfinite(scale) || scale < 0.0) {
+            return SD_STATUS_INVALID_SCALE;
+        }
+        if (scale == 0.0) {
+            for (size_t index = 0; index < count; ++index) {
+                if (values[index] != INT8_C(0)) {
+                    return SD_STATUS_INVALID_SCALE;
+                }
+            }
+        }
+
+        for (size_t index = 0; index < count; ++index) {
+            output_values[index] = static_cast<double>(values[index]) * scale;
+        }
         return SD_STATUS_OK;
     } catch (...) {
         return SD_STATUS_INTERNAL_ERROR;

@@ -4,11 +4,11 @@ An engineered C++/Python speculative-decoding pipeline designed to pair a small
 draft model with a larger target model while preserving the target model's exact
 output distribution.
 
-> **Project status:** Stages 1 through 3 are implemented. The exact Python
+> **Project status:** Stages 1 through 4 are implemented. The exact Python
 > reference engine supports optional Hugging Face models and can route sampling,
 > residual construction, and vectorized draft verification through a compiled
-> C++17 library. CUDA kernels, INT8 KV-cache quantization, PagedAttention, and GPU
-> benchmarks remain planned.
+> C++17 library. A correctness-first paged INT8 KV-cache memory engine is also
+> implemented. CUDA model integration and GPU benchmarks remain planned.
 
 ## Why start with a reference engine?
 
@@ -28,6 +28,10 @@ Implemented now:
 - a versioned native C ABI with dependency-free `ctypes` bindings;
 - automatic native selection with a pure-Python fallback;
 - seeded native/Python parity for tokens, events, statistics, and RNG state;
+- deterministic logical-to-physical KV block allocation and reclamation;
+- atomic speculative cache appends with checkpoint rollback;
+- per-head symmetric INT8 KV quantization with Python/C++ parity;
+- dequantization error-bound tests and format-level memory accounting;
 - deterministic unit tests and an empirical distribution-equivalence test;
 - zero required third-party Python dependencies.
 
@@ -62,9 +66,9 @@ tokens, model vocabulary sizes, or embedding ranges are incompatible. Use
 
 Stage 2 intentionally performs stateless full-context forwards. It proves real
 model integration and batches target proposal verification, but KV-cache reuse
-is deferred to the memory-engine stages.
+inside model execution is deferred to the CUDA integration stage.
 
-## Build the Stage 3 native core
+## Build the Stage 3/4 native core
 
 The pure-Python package still works without a compiler. To enable the C++
 backend in a source checkout:
@@ -89,6 +93,17 @@ selects Python before generation begins. Native operation errors never trigger a
 silent mid-generation fallback. Set `SPECDECODE_SAMPLING_BACKEND=python` to force
 the reference path for a complete process or test run.
 
+## Stage 4 cache boundary
+
+`PagedKVCache` provides fixed-pool physical blocks, per-sequence block tables,
+atomic multi-token appends, suffix rollback, INT8 K/V storage, and precise format
+accounting. `PythonKVQuantizer` is the dependency-free oracle;
+`NativeKVQuantizer` runs the matching C++ CPU kernels.
+
+The cache is intentionally standalone in this stage. It is not yet wired into
+Hugging Face `past_key_values` or a CUDA PagedAttention kernel, so its theoretical
+storage ratio must not be reported as measured GPU memory savings.
+
 ## Run tests
 
 ```bash
@@ -100,7 +115,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 1. **Exact Python reference** — complete.
 2. **Model integration** — complete; Hugging Face adapters and streaming CLI.
 3. **Native core** — complete; C++ verification/sampling with Python bindings.
-4. **Memory engine** — paged KV blocks and per-head INT8 quantization.
+4. **Memory engine** — complete; paged KV blocks and per-head INT8 quantization.
 5. **CUDA pipeline** — asynchronous streams, pinned transfers, kernels, benchmarks.
 
 The target numbers (82 tok/s, 2.4x throughput, 42% lower KV memory, and 42 ms p99
@@ -109,3 +124,4 @@ reported as achieved results.
 
 See [docs/architecture.md](docs/architecture.md) for the evolving design.
 See [docs/native.md](docs/native.md) for the C ABI and backend contract.
+See [docs/kv-cache.md](docs/kv-cache.md) for the Stage 4 memory contract.

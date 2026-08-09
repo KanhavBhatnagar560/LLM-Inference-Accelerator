@@ -10,9 +10,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .backends import VerificationResult
+from .kv_cache import QuantizedVector
 
 
-ABI_VERSION = 0x00010000
+ABI_VERSION = 0x00010001
 
 
 class NativeLibraryNotFound(OSError):
@@ -85,6 +86,7 @@ class _NativeLibrary:
 
     def _configure(self) -> None:
         double_pointer = ctypes.POINTER(ctypes.c_double)
+        int8_pointer = ctypes.POINTER(ctypes.c_int8)
         uint64_pointer = ctypes.POINTER(ctypes.c_uint64)
         size_pointer = ctypes.POINTER(ctypes.c_size_t)
 
@@ -129,6 +131,20 @@ class _NativeLibrary:
             size_pointer,
         ]
         self.handle.sd_first_rejection_f64.restype = ctypes.c_int
+        self.handle.sd_quantize_symmetric_int8_f64.argtypes = [
+            double_pointer,
+            ctypes.c_size_t,
+            int8_pointer,
+            double_pointer,
+        ]
+        self.handle.sd_quantize_symmetric_int8_f64.restype = ctypes.c_int
+        self.handle.sd_dequantize_symmetric_int8_f64.argtypes = [
+            int8_pointer,
+            ctypes.c_size_t,
+            ctypes.c_double,
+            double_pointer,
+        ]
+        self.handle.sd_dequantize_symmetric_int8_f64.restype = ctypes.c_int
 
     def check(self, status: int, operation: str) -> None:
         if status == 0:
@@ -144,6 +160,57 @@ def _double_array(values: Sequence[float]) -> ctypes.Array:
 
 def _uint64_array(values: Sequence[int]) -> ctypes.Array:
     return (ctypes.c_uint64 * len(values))(*(int(value) for value in values))
+
+
+def _int8_array(values: Sequence[int]) -> ctypes.Array:
+    return (ctypes.c_int8 * len(values))(*(int(value) for value in values))
+
+
+class NativeKVQuantizer:
+    """Per-vector symmetric INT8 quantization using the native C ABI."""
+
+    name = "native"
+
+    def __init__(self, library: _NativeLibrary) -> None:
+        self._library = library
+
+    @classmethod
+    def load(cls, path: str | os.PathLike[str] | None = None) -> "NativeKVQuantizer":
+        return cls(_NativeLibrary(_resolve_library_path(path)))
+
+    @property
+    def library_path(self) -> str:
+        return self._library.path
+
+    def quantize(self, values: Sequence[float]) -> QuantizedVector:
+        source = tuple(values)
+        if any(isinstance(value, bool) for value in source):
+            raise TypeError("KV values must be real numbers, not booleans")
+        inputs = _double_array(source)
+        output = (ctypes.c_int8 * len(source))()
+        scale = ctypes.c_double()
+        status = self._library.handle.sd_quantize_symmetric_int8_f64(
+            inputs,
+            len(source),
+            output,
+            ctypes.byref(scale),
+        )
+        self._library.check(status, "INT8 quantization")
+        return QuantizedVector(tuple(int(value) for value in output), scale.value)
+
+    def dequantize(self, vector: QuantizedVector) -> tuple[float, ...]:
+        if not isinstance(vector, QuantizedVector):
+            raise TypeError("dequantization requires a QuantizedVector")
+        inputs = _int8_array(vector.values)
+        output = (ctypes.c_double * len(vector.values))()
+        status = self._library.handle.sd_dequantize_symmetric_int8_f64(
+            inputs,
+            len(vector.values),
+            vector.scale,
+            output,
+        )
+        self._library.check(status, "INT8 dequantization")
+        return tuple(output)
 
 
 class NativeSamplingBackend:

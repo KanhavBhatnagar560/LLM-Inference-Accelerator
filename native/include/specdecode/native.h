@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define SD_NATIVE_ABI_VERSION UINT32_C(0x00010000)
+#define SD_NATIVE_ABI_VERSION UINT32_C(0x00010001)
 
 typedef enum sd_status {
     SD_STATUS_OK = 0,
@@ -32,7 +32,8 @@ typedef enum sd_status {
     SD_STATUS_TOKEN_OUT_OF_RANGE = 6,
     SD_STATUS_INVALID_UNIFORM = 7,
     SD_STATUS_OVERFLOW = 8,
-    SD_STATUS_INTERNAL_ERROR = 9
+    SD_STATUS_INTERNAL_ERROR = 9,
+    SD_STATUS_INVALID_SCALE = 10
 } sd_status_t;
 
 SD_API uint32_t sd_abi_version(void);
@@ -83,6 +84,25 @@ SD_API sd_status_t sd_first_rejection_f64(
     size_t proposal_count,
     size_t* output_accepted_count,
     size_t* output_rejection_index
+);
+
+/*
+ * Symmetrically quantize one finite vector to [-127, 127]. The scale is
+ * float32(max(abs(values)) / 127), or zero for an all-zero vector.
+ */
+SD_API sd_status_t sd_quantize_symmetric_int8_f64(
+    const double* values,
+    size_t count,
+    int8_t* output_values,
+    double* output_scale
+);
+
+/* Dequantize one symmetric INT8 vector with a finite, non-negative scale. */
+SD_API sd_status_t sd_dequantize_symmetric_int8_f64(
+    const int8_t* values,
+    size_t count,
+    double scale,
+    double* output_values
 );
 
 #ifdef __cplusplus
