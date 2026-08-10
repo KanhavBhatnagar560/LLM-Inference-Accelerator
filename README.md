@@ -4,11 +4,10 @@ An engineered C++/Python speculative-decoding pipeline designed to pair a small
 draft model with a larger target model while preserving the target model's exact
 output distribution.
 
-> **Project status:** Stages 1 through 4 are implemented. The exact Python
-> reference engine supports optional Hugging Face models and can route sampling,
-> residual construction, and vectorized draft verification through a compiled
-> C++17 library. A correctness-first paged INT8 KV-cache memory engine is also
-> implemented. CUDA model integration and GPU benchmarks remain planned.
+> **Project status:** Stages 1 through 4 are complete. Stage 5 now has an
+> optional PyTorch CUDA execution layer and a reproducible target-only versus
+> speculative benchmark harness. Custom CUDA attention/quantization kernels,
+> model KV-cache integration, and validated NVIDIA measurements remain pending.
 
 ## Why start with a reference engine?
 
@@ -32,6 +31,10 @@ Implemented now:
 - atomic speculative cache appends with checkpoint rollback;
 - per-head symmetric INT8 KV quantization with Python/C++ parity;
 - dequantization error-bound tests and format-level memory accounting;
+- separate CUDA draft, target, and transfer streams with event dependencies;
+- reusable device workspaces, pinned host buffers, and nonblocking transfers;
+- optional timing events, NVTX ranges, and CUDA allocator memory snapshots;
+- a direct target-only baseline and versioned JSON comparison reports;
 - deterministic unit tests and an empirical distribution-equivalence test;
 - zero required third-party Python dependencies.
 
@@ -104,6 +107,28 @@ The cache is intentionally standalone in this stage. It is not yet wired into
 Hugging Face `past_key_values` or a CUDA PagedAttention kernel, so its theoretical
 storage ratio must not be reported as measured GPU memory savings.
 
+## Run the Stage 5 benchmark harness
+
+On an NVIDIA machine with the optional dependencies installed, compare both
+paths under identical prompts, seeds, dtype, device, and sampling settings:
+
+```bash
+specdecode benchmark \
+  --draft-model meta-llama/Llama-3.2-1B \
+  --target-model meta-llama/Llama-3.1-8B \
+  --device cuda:0 \
+  --dtype bfloat16 \
+  --prompt "Explain speculative decoding." \
+  --warmup-runs 2 \
+  --measured-runs 10 \
+  --output outputs/benchmark.json
+```
+
+The report records environment metadata, throughput, token-latency percentiles,
+peak PyTorch CUDA allocator memory, settings, and token hashes. Model loading and
+tokenization are excluded. This harness is implemented, but this repository does
+not yet contain NVIDIA results or evidence for the target performance numbers.
+
 ## Run tests
 
 ```bash
@@ -116,7 +141,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 2. **Model integration** — complete; Hugging Face adapters and streaming CLI.
 3. **Native core** — complete; C++ verification/sampling with Python bindings.
 4. **Memory engine** — complete; paged KV blocks and per-head INT8 quantization.
-5. **CUDA pipeline** — asynchronous streams, pinned transfers, kernels, benchmarks.
+5. **CUDA pipeline** — in progress; execution/profiling and benchmark foundation
+   implemented, custom kernels and hardware validation pending.
 
 The target numbers (82 tok/s, 2.4x throughput, 42% lower KV memory, and 42 ms p99
 latency) must be reproduced on a documented GPU and model pair before being
@@ -125,3 +151,5 @@ reported as achieved results.
 See [docs/architecture.md](docs/architecture.md) for the evolving design.
 See [docs/native.md](docs/native.md) for the C ABI and backend contract.
 See [docs/kv-cache.md](docs/kv-cache.md) for the Stage 4 memory contract.
+See [docs/cuda-benchmarking.md](docs/cuda-benchmarking.md) for Stage 5 usage and
+measurement limitations.

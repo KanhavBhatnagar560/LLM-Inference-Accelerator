@@ -68,6 +68,8 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         self.model = model
         self.tokenizer = tokenizer
         self._torch = torch_module
+        self.cuda_runtime: Any | None = None
+        self.cuda_stream_role = "target"
         self.model.eval()
 
         vocabulary = dict(tokenizer.get_vocab())
@@ -110,6 +112,12 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
     def input_device(self) -> Any:
         return self.model.get_input_embeddings().weight.device
 
+    def configure_cuda_runtime(self, runtime: Any, *, stream_role: str) -> None:
+        if stream_role not in ("draft", "target"):
+            raise ValueError("model CUDA stream role must be draft or target")
+        self.cuda_runtime = runtime
+        self.cuda_stream_role = stream_role
+
     def _probabilities_at_positions(
         self,
         token_ids: Sequence[int],
@@ -117,18 +125,53 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
     ) -> Sequence[Sequence[float]]:
         if not token_ids:
             raise ValueError("a causal language model requires a non-empty context")
-        input_ids = self._torch.tensor(
-            [list(token_ids)],
-            dtype=self._torch.long,
-            device=self.input_device,
-        )
-        attention_mask = self._torch.ones_like(input_ids)
-        with self._torch.inference_mode():
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                use_cache=False,
+        if self.cuda_runtime is None:
+            input_ids = self._torch.tensor(
+                [list(token_ids)],
+                dtype=self._torch.long,
+                device=self.input_device,
             )
+            attention_mask = self._torch.ones_like(input_ids)
+            with self._torch.inference_mode():
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                )
+        else:
+            cpu_input_ids = self._torch.tensor(
+                [list(token_ids)],
+                dtype=self._torch.long,
+                device="cpu",
+            )
+            cpu_attention_mask = self._torch.ones_like(cpu_input_ids)
+            input_task = self.cuda_runtime.copy_to_device(
+                f"{self.cuda_stream_role}.input_ids",
+                cpu_input_ids,
+            )
+            mask_task = self.cuda_runtime.copy_to_device(
+                f"{self.cuda_stream_role}.attention_mask",
+                cpu_attention_mask,
+            )
+
+            def forward() -> Any:
+                with self._torch.inference_mode():
+                    return self.model(
+                        input_ids=input_task.result,
+                        attention_mask=mask_task.result,
+                        use_cache=False,
+                    )
+
+            submit = (
+                self.cuda_runtime.submit_draft
+                if self.cuda_stream_role == "draft"
+                else self.cuda_runtime.submit_target
+            )
+            outputs = submit(
+                forward,
+                wait_for=(input_task, mask_task),
+                label=f"specdecode.{self.cuda_stream_role}.forward",
+            ).wait()
         logits = outputs.logits
         if logits.ndim != 3 or int(logits.shape[-1]) != self.vocab_size:
             raise ValueError("causal LM returned logits with an unexpected shape")
@@ -144,6 +187,8 @@ class HuggingFaceModelPair:
     draft: HuggingFaceCausalLM
     target: HuggingFaceCausalLM
     tokenizer: Any
+    cuda_runtime: Any | None = None
+    transformers_version: str | None = None
 
     @classmethod
     def from_pretrained(
@@ -158,8 +203,10 @@ class HuggingFaceModelPair:
         dtype: str = "auto",
         trust_remote_code: bool = False,
         local_files_only: bool = False,
+        enable_cuda_runtime: bool = False,
+        cuda_device: str | None = None,
     ) -> "HuggingFaceModelPair":
-        _, _, tokenizer_class, _ = _require_backends()
+        _, _, tokenizer_class, transformers_version = _require_backends()
         draft_tokenizer = tokenizer_class.from_pretrained(
             draft_model_id,
             use_fast=True,
@@ -202,4 +249,31 @@ class HuggingFaceModelPair:
         )
         if draft.vocab_size != target.vocab_size:
             raise ValueError("draft and target model output vocabularies differ")
-        return cls(draft=draft, target=target, tokenizer=target.tokenizer)
+        runtime = None
+        if enable_cuda_runtime:
+            from .cuda import CudaExecutionRuntime, CudaRuntimeConfig
+
+            draft_device = str(draft.input_device)
+            target_device = str(target.input_device)
+            if draft_device != target_device:
+                raise ValueError(
+                    "one shared CUDA runtime requires draft and target on the same device"
+                )
+            selected_device = cuda_device or target_device
+            if str(target._torch.device(selected_device)) != str(
+                target._torch.device(target_device)
+            ):
+                raise ValueError("CUDA runtime device must match the loaded model device")
+            runtime = CudaExecutionRuntime(
+                CudaRuntimeConfig(device=selected_device),
+                torch_module=target._torch,
+            )
+            draft.configure_cuda_runtime(runtime, stream_role="draft")
+            target.configure_cuda_runtime(runtime, stream_role="target")
+        return cls(
+            draft=draft,
+            target=target,
+            tokenizer=target.tokenizer,
+            cuda_runtime=runtime,
+            transformers_version=transformers_version,
+        )

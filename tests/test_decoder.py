@@ -1,7 +1,7 @@
 import random
 import unittest
 
-from specdecode import DecodeConfig, SpeculativeDecoder, TableModel
+from specdecode import DecodeConfig, SpeculativeDecoder, TableModel, TargetOnlyDecoder
 
 
 class BrokenDraft:
@@ -17,6 +17,22 @@ class ZeroRandom(random.Random):
 
 
 class DecoderTests(unittest.TestCase):
+    def test_target_only_baseline_emits_distinct_events_and_stops_at_eos(self) -> None:
+        model = TableModel({}, default=(0.0, 1.0))
+        events = []
+        decoder = TargetOnlyDecoder(
+            model,
+            DecodeConfig(max_new_tokens=4, eos_token_id=1),
+            rng=random.Random(1),
+        )
+
+        result = decoder.generate([0], on_token=events.append)
+
+        self.assertEqual(result.generated_tokens, (1,))
+        self.assertEqual(result.stats.target_tokens, 1)
+        self.assertEqual(result.stats.fallback_steps, 0)
+        self.assertEqual(events[0].source, "target_only")
+
     def test_identical_models_accept_and_stop_at_eos(self) -> None:
         model = TableModel(
             {(): (0.0, 1.0, 0.0), (1,): (0.0, 0.0, 1.0)},

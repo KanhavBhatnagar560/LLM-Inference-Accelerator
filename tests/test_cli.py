@@ -23,6 +23,25 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.draft_model, "draft/model")
         self.assertEqual(args.target_model, "target/model")
 
+    def test_benchmark_arguments_parse_without_loading_optional_dependencies(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "benchmark",
+                "--draft-model",
+                "draft/model",
+                "--target-model",
+                "target/model",
+                "--prompt",
+                "hello",
+                "--prompt",
+                "world",
+            ]
+        )
+        self.assertEqual(args.device, "cuda:0")
+        self.assertEqual(args.prompt, ["hello", "world"])
+        self.assertEqual(args.warmup_runs, 2)
+        self.assertEqual(args.measured_runs, 10)
+
     def test_demo_runs_without_optional_dependencies(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

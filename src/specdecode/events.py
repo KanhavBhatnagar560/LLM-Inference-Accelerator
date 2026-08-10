@@ -9,6 +9,7 @@ TokenSource = Literal[
     "target_correction",
     "target_bonus",
     "target_fallback",
+    "target_only",
 ]
 
 

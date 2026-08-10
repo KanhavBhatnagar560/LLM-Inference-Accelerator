@@ -54,6 +54,40 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow model repositories to execute custom code",
     )
+
+    benchmark = subparsers.add_parser(
+        "benchmark",
+        help="benchmark target-only and speculative decoding on one CUDA device",
+    )
+    benchmark.add_argument("--draft-model", required=True)
+    benchmark.add_argument("--target-model", required=True)
+    benchmark.add_argument("--draft-revision")
+    benchmark.add_argument("--target-revision")
+    benchmark.add_argument("--device", default="cuda:0")
+    benchmark.add_argument(
+        "--dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+    )
+    benchmark.add_argument("--prompt", action="append", required=True)
+    benchmark.add_argument("--chat", action="store_true")
+    benchmark.add_argument("--max-new-tokens", type=int, default=64)
+    benchmark.add_argument("--initial-draft-tokens", type=int, default=4)
+    benchmark.add_argument("--min-draft-tokens", type=int, default=1)
+    benchmark.add_argument("--max-draft-tokens", type=int, default=8)
+    benchmark.add_argument("--no-dynamic-draft", action="store_true")
+    benchmark.add_argument("--seed", type=int, default=7)
+    benchmark.add_argument("--warmup-runs", type=int, default=2)
+    benchmark.add_argument("--measured-runs", type=int, default=10)
+    benchmark.add_argument("--output", default="outputs/benchmark.json")
+    benchmark.add_argument(
+        "--sampling-backend",
+        choices=("auto", "python", "native"),
+        default="auto",
+    )
+    benchmark.add_argument("--native-library")
+    benchmark.add_argument("--local-files-only", action="store_true")
+    benchmark.add_argument("--trust-remote-code", action="store_true")
     return parser
 
 
@@ -160,6 +194,110 @@ def run_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_benchmark_command(args: argparse.Namespace) -> int:
+    from .benchmark import (
+        BenchmarkConfig,
+        DecoderBenchmarkRunner,
+        run_comparison_benchmark,
+    )
+    from .decoder import TargetOnlyDecoder
+    from .huggingface import HuggingFaceModelPair
+
+    pair = HuggingFaceModelPair.from_pretrained(
+        args.draft_model,
+        args.target_model,
+        draft_revision=args.draft_revision,
+        target_revision=args.target_revision,
+        draft_device=args.device,
+        target_device=args.device,
+        dtype=args.dtype,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+        enable_cuda_runtime=True,
+        cuda_device=args.device,
+    )
+    if pair.cuda_runtime is None:
+        raise RuntimeError("benchmark requested CUDA but no CUDA runtime was configured")
+    prompts = tuple(
+        encode_prompt(pair.tokenizer, prompt, chat=args.chat) for prompt in args.prompt
+    )
+    decode_config = DecodeConfig(
+        max_new_tokens=args.max_new_tokens,
+        initial_draft_tokens=args.initial_draft_tokens,
+        min_draft_tokens=args.min_draft_tokens,
+        max_draft_tokens=args.max_draft_tokens,
+        dynamic_draft=not args.no_dynamic_draft,
+        eos_token_id=pair.tokenizer.eos_token_id,
+    )
+    backend = load_sampling_backend(
+        args.sampling_backend,
+        library_path=args.native_library,
+    )
+    target_runner = DecoderBenchmarkRunner(
+        "target_only",
+        lambda seed: TargetOnlyDecoder(
+            pair.target,
+            decode_config,
+            rng=random.Random(seed),
+            sampling_backend=backend,
+        ),
+    )
+    speculative_runner = DecoderBenchmarkRunner(
+        "speculative",
+        lambda seed: SpeculativeDecoder(
+            pair.draft,
+            pair.target,
+            decode_config,
+            rng=random.Random(seed),
+            sampling_backend=backend,
+        ),
+    )
+    environment = pair.cuda_runtime.environment()
+    environment["transformers"] = pair.transformers_version
+    report = run_comparison_benchmark(
+        target_runner,
+        speculative_runner,
+        prompts,
+        BenchmarkConfig(
+            warmup_runs=args.warmup_runs,
+            measured_runs=args.measured_runs,
+            seed=args.seed,
+        ),
+        settings={
+            "draft_model": args.draft_model,
+            "draft_revision": args.draft_revision,
+            "target_model": args.target_model,
+            "target_revision": args.target_revision,
+            "dtype": args.dtype,
+            "device": args.device,
+            "batch_size": 1,
+            "prompt_count": len(prompts),
+            "max_new_tokens": args.max_new_tokens,
+            "initial_draft_tokens": args.initial_draft_tokens,
+            "min_draft_tokens": args.min_draft_tokens,
+            "max_draft_tokens": args.max_draft_tokens,
+            "dynamic_draft": not args.no_dynamic_draft,
+            "sampling_backend": backend.name,
+            "temperature": 1.0,
+            "model_loading_excluded": True,
+            "tokenization_excluded": True,
+            "kv_cache_mode": "stateless_full_context",
+        },
+        environment=environment,
+        synchronize=pair.cuda_runtime.synchronize,
+        memory_probe=pair.cuda_runtime,
+    )
+    destination = report.write_json(args.output)
+    speedup = report.throughput_speedup
+    speedup_text = f"{speedup:.3f}x" if speedup is not None else "unavailable"
+    print("benchmark report:", destination)
+    print("target-only throughput:", f"{report.target_only.tokens_per_second:.3f} tok/s")
+    print("speculative throughput:", f"{report.speculative.tokens_per_second:.3f} tok/s")
+    print("throughput speedup:", speedup_text)
+    print("speculative p99 token latency:", f"{report.speculative.p99_token_latency_ms:.3f} ms")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -172,7 +310,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "generate":
             return run_generate(args)
-    except (ImportError, OSError, RuntimeError) as error:
+        if args.command == "benchmark":
+            return run_benchmark_command(args)
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
         parser.exit(2, f"specdecode: error: {error}\n")
     parser.error(f"unknown command: {args.command}")
     return 2

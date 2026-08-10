@@ -246,3 +246,75 @@ class SpeculativeDecoder:
                 break
 
         return DecodeResult(prompt, tuple(generated), stats)
+
+
+class TargetOnlyDecoder:
+    """Direct target-model baseline using the same sampling contract."""
+
+    def __init__(
+        self,
+        target_model: ProbabilityModel,
+        config: DecodeConfig | None = None,
+        *,
+        rng: random.Random | None = None,
+        sampling_backend: SamplingBackend | None = None,
+    ) -> None:
+        if target_model.vocab_size < 1:
+            raise ValueError("model vocabulary must be positive")
+        self.target_model = target_model
+        self.config = config or DecodeConfig()
+        if self.config.eos_token_id is not None and not (
+            0 <= self.config.eos_token_id < target_model.vocab_size
+        ):
+            raise ValueError("eos_token_id must be inside the target vocabulary")
+        self.rng = rng if rng is not None else random.Random()
+        self.sampling_backend = (
+            sampling_backend
+            if sampling_backend is not None
+            else PythonSamplingBackend()
+        )
+
+    def _validate_prompt(self, prompt_tokens: Sequence[int]) -> tuple[int, ...]:
+        prompt: list[int] = []
+        for token in prompt_tokens:
+            if isinstance(token, bool) or not isinstance(token, Integral):
+                raise TypeError("prompt token IDs must be integers")
+            token_id = int(token)
+            if not 0 <= token_id < self.target_model.vocab_size:
+                raise ValueError("prompt token ID is outside the target vocabulary")
+            prompt.append(token_id)
+        return tuple(prompt)
+
+    def generate(
+        self,
+        prompt_tokens: Sequence[int],
+        *,
+        on_token: Callable[[TokenEvent], None] | None = None,
+    ) -> DecodeResult:
+        prompt = self._validate_prompt(prompt_tokens)
+        generated: list[int] = []
+        stats = DecodeStats()
+
+        while len(generated) < self.config.max_new_tokens:
+            probabilities = normalize_probabilities(
+                self.target_model.next_token_probs(prompt + tuple(generated)),
+                expected_size=self.target_model.vocab_size,
+            )
+            token = self.sampling_backend.categorical(
+                probabilities,
+                self.rng.random(),
+            )
+            generated.append(token)
+            stats.target_tokens += 1
+            if on_token is not None:
+                on_token(
+                    TokenEvent(
+                        token_id=token,
+                        index=len(generated) - 1,
+                        source="target_only",
+                    )
+                )
+            if token == self.config.eos_token_id:
+                break
+
+        return DecodeResult(prompt, tuple(generated), stats)

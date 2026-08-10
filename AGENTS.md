@@ -23,10 +23,12 @@ the Python reference engine's behavior and output distribution.
 
 ## Current repository state
 
-Stages 1 through 4 are implemented. The dependency-free Python engine remains the
+Stages 1 through 4 are complete. The Stage 5 execution and benchmark foundation
+is implemented, while custom CUDA attention/quantization kernels and hardware
+measurements remain pending. The dependency-free Python engine remains the
 oracle, the Hugging Face adapter connects real causal models, a paged cache
 reference manages quantized K/V entries, and an optional C++17 shared library
-handles sampling, verification, and INT8 quantization. CUDA is not implemented.
+handles sampling, verification, and INT8 quantization.
 
 Implemented:
 
@@ -57,16 +59,25 @@ Implemented:
 - atomic multi-token cache appends and speculative-suffix rollback;
 - per-head symmetric INT8 quantization with Python and C++ implementations;
 - reference dequantization with documented error bounds;
-- used, allocated, capacity, FP32-equivalent, and block-table memory accounting.
+- used, allocated, capacity, FP32-equivalent, and block-table memory accounting;
+- a direct target-only decoder for benchmark baselines;
+- lazy optional PyTorch CUDA execution without changing base dependencies;
+- dedicated draft, target, and transfer streams with explicit event dependencies;
+- geometric device-workspace and pinned-host-buffer reuse;
+- nonblocking host-to-device copies, timing events, and NVTX profiling ranges;
+- CUDA allocator snapshots and reproducible environment metadata;
+- identical-seed target/speculative warmup and measured comparisons;
+- versioned JSON throughput, latency-percentile, memory, and token-hash reports.
 
 Not implemented yet:
 
 - an HTTP or production serving layer;
 - Hugging Face `past_key_values` reuse and cache integration;
-- CUDA PagedAttention, quantization, and stream-execution kernels;
+- custom CUDA PagedAttention and INT8 quantization kernels;
+- device-resident verification and sampling;
 - shared-prefix cache blocks and copy-on-write serving optimizations;
 - platform-specific native wheel production;
-- GPU benchmark and profiling infrastructure;
+- isolated process-level model-memory and maximum-batch measurements;
 - validated performance numbers on NVIDIA hardware.
 
 Do not describe a planned feature or target metric as completed.
@@ -81,6 +92,7 @@ Do not describe a planned feature or target metric as completed.
 ├── README.md                    user-facing overview and status
 ├── docs/
 │   ├── architecture.md          design layers and stage boundaries
+│   ├── cuda-benchmarking.md     Stage 5 runtime and measurement contract
 │   ├── kv-cache.md              paging, quantization, and memory contract
 │   └── native.md                C ABI, loader, RNG, and native-kernel contract
 ├── native/
@@ -92,8 +104,10 @@ Do not describe a planned feature or target metric as completed.
 │   ├── __init__.py              public Python API
 │   ├── __main__.py              dependency-free demo
 │   ├── backends.py              backend protocol and Python oracle
+│   ├── benchmark.py             fair comparison harness and JSON reports
 │   ├── cli.py                   toy and real-model command-line interface
 │   ├── config.py                immutable decoding configuration
+│   ├── cuda.py                  optional streams, events, buffers, profiling
 │   ├── decoder.py               exact speculative-decoding loop
 │   ├── events.py                typed streaming token events
 │   ├── huggingface.py           optional PyTorch/Transformers adapter
@@ -104,6 +118,8 @@ Do not describe a planned feature or target metric as completed.
 │   └── tokenizers.py            compatibility, prompt, and streaming helpers
 └── tests/
     ├── test_batched_scoring.py  causal-logit alignment and dispatch tests
+    ├── test_benchmark.py        fairness, metrics, and report tests
+    ├── test_cuda.py             dependency-free fake-CUDA runtime tests
     ├── test_decoder.py          decoder correctness and distribution tests
     ├── test_huggingface.py      dependency-free adapter component test
     ├── test_kv_cache.py         paging, rollback, quantization, accounting tests
@@ -170,8 +186,10 @@ The following are non-negotiable invariants:
 The sequential Stage 1 path remains available. A target implementing
 `score_proposal()` evaluates all proposal positions and the bonus position in one
 call. Hugging Face execution is currently stateless and uses the full context.
+When explicitly enabled, the adapter stages inputs through reusable pinned and
+device buffers, then runs forwards on named CUDA streams after transfer events.
 The standalone Stage 4 cache can roll back rejected proposal suffixes, but model
-cache integration remains deferred until the CUDA execution stage.
+cache integration and custom CUDA kernels remain pending Stage 5 work.
 
 Numerical sampling routes through `SamplingBackend`. Python owns every random
 draw and passes explicit uniforms into either implementation. Native acceptance
@@ -187,6 +205,7 @@ The root package exports:
 - `DecodeConfig` — generation limit, draft-window bounds, dynamic-window flag,
   and optional EOS token ID;
 - `SpeculativeDecoder` — exact reference generator;
+- `TargetOnlyDecoder` — direct target baseline using the same sampling contract;
 - `DecodeResult` — prompt tokens, generated tokens, and statistics;
 - `DecodeStats` — drafted, accepted, rejected, target-sampled, verification, and
   fallback counters;
@@ -204,7 +223,13 @@ The root package exports:
 - `KVQuantizer` and `PythonKVQuantizer` — injectable quantization contract and
   dependency-free oracle;
 - `QuantizedVector`, `QuantizedKVToken`, and `DequantizedKVToken` — immutable
-  cache data records.
+  cache data records;
+- `CudaRuntimeConfig`, `CudaExecutionRuntime`, `CudaTask`, `CudaRuntimeStats`, and
+  `CudaMemorySnapshot` — lazy optional CUDA scheduling and profiling interfaces;
+- `BenchmarkConfig`, `BenchmarkSample`, `BenchmarkMetrics`, and `BenchmarkReport`
+  — reproducible comparison configuration and results;
+- `DecoderBenchmarkRunner` and `run_comparison_benchmark` — adapters and the fair
+  target-only/speculative measurement harness.
 
 The `ProbabilityModel` contract currently requires:
 
@@ -239,6 +264,17 @@ python3 -m pip install -e '.[transformers]'
 specdecode generate --draft-model DRAFT --target-model TARGET --prompt "Hello"
 ```
 
+Run an instrumented CUDA comparison on NVIDIA hardware:
+
+```bash
+specdecode benchmark \
+  --draft-model DRAFT \
+  --target-model TARGET \
+  --device cuda:0 \
+  --prompt "Hello" \
+  --output outputs/benchmark.json
+```
+
 Build and test the native core:
 
 ```bash
@@ -268,9 +304,9 @@ git diff --check
 When optional development dependencies are installed, `pytest` and `ruff` may
 also be used, but standard-library tests must continue to work.
 
-## Test coverage through Stage 4
+## Test coverage through the Stage 5 foundation
 
-The 56 current Python tests plus two CTest executables cover:
+The 74 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -296,7 +332,12 @@ The 56 current Python tests plus two CTest executables cover:
 - atomic capacity/shape failures and speculative checkpoint rollback;
 - per-head INT8 scale metadata and dequantization error bounds;
 - Python/native quantization, dequantization, and paged-cache parity;
-- used-versus-allocated compact-format memory accounting.
+- used-versus-allocated compact-format memory accounting;
+- a direct target-only baseline with streaming and EOS behavior;
+- dependency-free fake-CUDA stream, event, timing, NVTX, and buffer-pool tests;
+- pinned nonblocking transfers and Hugging Face stream integration;
+- fair benchmark seeds, alternating order, latency/throughput aggregation,
+  allocator peaks, validation, and JSON report contents.
 
 Any change to sampling, verification, scheduling, or fallback behavior must add
 or update tests. Prefer deterministic unit cases for branches and a bounded
@@ -340,13 +381,18 @@ The dependency-free paged cache implements logical-to-physical block tables,
 deterministic allocation/reclamation, atomic append and suffix rollback, per-head
 INT8 metadata, Python and native CPU quantization kernels, reference
 dequantization, format-level memory accounting, and numerical parity tests.
-Hugging Face and CUDA cache integration remains Stage 5 work.
+Hugging Face model cache integration and custom CUDA kernels remain Stage 5 work.
 
-### Stage 5 — CUDA execution and benchmarking
+### Stage 5 — CUDA execution and benchmarking: in progress
 
-Introduce reusable device workspaces, pinned host buffers, asynchronous CUDA
-streams/events, and profiling ranges. Benchmark target-only and speculative paths
-under identical sampling settings, prompts, warmup, batch sizes, and hardware.
+Implemented: reusable device workspaces, pinned host buffers, separate CUDA
+streams with explicit events, timing/NVTX profiling, allocator/environment
+reporting, a direct target-only baseline, and a fair versioned JSON benchmark.
+
+Pending: Hugging Face `past_key_values` reuse, integration with the Stage 4 cache,
+device-resident verification/sampling, custom CUDA PagedAttention and INT8
+quantization kernels, isolated memory/batch testing, and measurements on
+documented NVIDIA hardware.
 
 ## Benchmark reporting rules
 

@@ -65,6 +65,33 @@ class FakeTorch:
         return selected
 
 
+class FakeCudaTask:
+    def __init__(self, result):
+        self.result = result
+
+    def wait(self):
+        return self.result
+
+
+class FakeCudaRuntime:
+    def __init__(self):
+        self.transfers = []
+        self.submissions = []
+
+    def copy_to_device(self, name, source):
+        task = FakeCudaTask(source)
+        self.transfers.append((name, source, task))
+        return task
+
+    def submit_draft(self, operation, *, wait_for, label):
+        self.submissions.append(("draft", wait_for, label))
+        return FakeCudaTask(operation())
+
+    def submit_target(self, operation, *, wait_for, label):
+        self.submissions.append(("target", wait_for, label))
+        return FakeCudaTask(operation())
+
+
 class FakeTokenizer:
     bos_token_id = None
     eos_token_id = None
@@ -125,6 +152,24 @@ class HuggingFaceAdapterTests(unittest.TestCase):
         self.assertTrue(model.eval_called)
         self.assertEqual(model.calls, [([0, 1, 0, 1], False)])
         self.assertEqual(rows, [[0.25, 0.75], [0.75, 0.25], [0.25, 0.75]])
+
+    def test_adapter_uses_pinned_transfer_and_named_cuda_stream(self) -> None:
+        model = FakeModel()
+        adapter = HuggingFaceCausalLM(model, FakeTokenizer(), FakeTorch())
+        runtime = FakeCudaRuntime()
+        adapter.configure_cuda_runtime(runtime, stream_role="target")
+
+        rows = adapter.next_token_probs([0, 1])
+
+        self.assertEqual(rows, [0.25, 0.75])
+        self.assertEqual(
+            [name for name, _, _ in runtime.transfers],
+            ["target.input_ids", "target.attention_mask"],
+        )
+        role, dependencies, label = runtime.submissions[0]
+        self.assertEqual(role, "target")
+        self.assertEqual(len(dependencies), 2)
+        self.assertEqual(label, "specdecode.target.forward")
 
     def test_pair_rejects_tokenizers_before_loading_model_weights(self) -> None:
         backends = (FakeTorch(), object(), FakeAutoTokenizer, "4.44.2")

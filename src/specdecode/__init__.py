@@ -6,8 +6,26 @@ from .backends import (
     VerificationResult,
     load_sampling_backend,
 )
+from .benchmark import (
+    BenchmarkConfig,
+    BenchmarkMetrics,
+    BenchmarkReport,
+    BenchmarkSample,
+    DecoderBenchmarkRunner,
+    GenerationRunner,
+    run_comparison_benchmark,
+)
 from .config import DecodeConfig
-from .decoder import DecodeResult, DecodeStats, SpeculativeDecoder
+from .cuda import (
+    CudaDependencyError,
+    CudaExecutionRuntime,
+    CudaMemorySnapshot,
+    CudaRuntimeConfig,
+    CudaRuntimeStats,
+    CudaTask,
+    CudaUnavailableError,
+)
+from .decoder import DecodeResult, DecodeStats, SpeculativeDecoder, TargetOnlyDecoder
 from .events import TokenEvent, TokenSource
 from .kv_cache import (
     DequantizedKVToken,
@@ -30,9 +48,21 @@ from .models import (
 )
 
 __all__ = [
+    "BenchmarkConfig",
+    "BenchmarkMetrics",
+    "BenchmarkReport",
+    "BenchmarkSample",
+    "CudaDependencyError",
+    "CudaExecutionRuntime",
+    "CudaMemorySnapshot",
+    "CudaRuntimeConfig",
+    "CudaRuntimeStats",
+    "CudaTask",
+    "CudaUnavailableError",
     "DecodeConfig",
     "DecodeResult",
     "DecodeStats",
+    "DecoderBenchmarkRunner",
     "DequantizedKVToken",
     "CausalLMProbabilityAdapter",
     "KVCacheCapacityError",
@@ -41,6 +71,7 @@ __all__ = [
     "KVCacheError",
     "KVCacheStats",
     "KVQuantizer",
+    "GenerationRunner",
     "PagedKVCache",
     "PythonSamplingBackend",
     "PythonKVQuantizer",
@@ -51,8 +82,10 @@ __all__ = [
     "SpeculativeDecoder",
     "SamplingBackend",
     "TableModel",
+    "TargetOnlyDecoder",
     "TokenEvent",
     "TokenSource",
     "VerificationResult",
     "load_sampling_backend",
+    "run_comparison_benchmark",
 ]

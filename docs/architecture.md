@@ -53,8 +53,8 @@ mappings plus matching BOS, EOS, PAD, and UNK IDs. Equal vocabulary sizes alone
 are not sufficient.
 
 Each committed token can emit a `TokenEvent` whose source is accepted draft,
-target correction, target bonus, or target fallback. Events are fired only after
-the token becomes part of the output.
+target correction, target bonus, target fallback, or direct target-only output.
+Events are fired only after the token becomes part of the output.
 
 ## Native backend contract
 
@@ -80,6 +80,35 @@ Each key and value head is quantized independently with a symmetric INT8 scale.
 matching C++ CPU kernels. The dequantization error bound and format-level byte
 formulas are documented in `docs/kv-cache.md`. This standalone cache is not yet
 connected to Hugging Face model state or CUDA attention.
+
+## CUDA execution contract
+
+`CudaExecutionRuntime` is optional and imports PyTorch lazily. One runtime owns
+separate draft, target, and transfer streams for one CUDA device. Submitted work
+returns a `CudaTask` containing a completion event; downstream streams wait on
+that event instead of synchronizing the whole device.
+
+Pinned host buffers and device workspaces grow geometrically and are reused by
+logical name and dtype. Input copies use the transfer stream and model forwards
+wait on their transfer events. Timing events and NVTX ranges expose operation
+boundaries to profilers. Full-device synchronization is reserved for explicit
+benchmark boundaries.
+
+The current Hugging Face integration is still stateless: every forward receives
+the full context with `use_cache=False`, and probability rows return to the CPU
+for exact sampling. The Stage 4 cache is not consumed by model execution yet.
+
+## Benchmark contract
+
+`TargetOnlyDecoder` provides a direct baseline using the same target model,
+sampling backend, output limit, EOS rule, and seeded RNG contract. The comparison
+harness warms both paths, gives them identical prompt/seed pairs, alternates run
+order, synchronizes around timed samples, and emits a versioned JSON report.
+
+Reports include environment and model settings, throughput, p50/p95/p99 token
+latency, allocator peaks, and hashed input/output token sequences. They exclude
+raw prompt content. Shared-process allocator peaks are useful for steady-state
+comparison but are not isolated total model-footprint measurements.
 
 ## Stage boundaries
 
@@ -111,8 +140,14 @@ connected to Hugging Face model state or CUDA attention.
 - Per-head symmetric INT8 scale metadata and Python/native CPU kernels.
 - Reference dequantization, error-bound tests, and memory accounting.
 
-### Stage 5: CUDA and measurement
+### Stage 5: CUDA and measurement — in progress
 
-- Separate draft, target, and transfer streams with explicit events.
-- Pinned host memory and reusable device workspaces.
-- Warmup, throughput, latency-percentile, memory, and accuracy harnesses.
+- Implemented: separate draft, target, and transfer streams with explicit events.
+- Implemented: pinned host memory and reusable device workspaces.
+- Implemented: timing events, NVTX ranges, allocator snapshots, and environment
+  metadata.
+- Implemented: fair target-only/speculative warmup, throughput, latency, memory,
+  and JSON reporting harness.
+- Pending: cache-aware model forwards and device-resident sampling/verification.
+- Pending: custom CUDA PagedAttention and INT8 cache kernels.
+- Pending: benchmark and quality evidence from documented NVIDIA hardware.
