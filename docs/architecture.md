@@ -48,6 +48,13 @@ run on `prefix + proposal`. Logit positions `L-1` through `L+K-1` produce the
 `K+1` required distributions. The Hugging Face adapter slices those positions,
 converts logits to float32 probabilities, and performs no gradient tracking.
 
+With cache reuse enabled, the first call prefills the prompt and retains the
+returned `past_key_values`. Later calls find the longest shared prefix, crop a
+speculatively cached suffix when necessary, and forward only uncached tokens.
+The next-token distribution at the cache boundary is retained so target proposal
+verification can reuse it without replaying the final prefix token. Decoders
+reset cache-aware models before every generation request.
+
 Draft and target tokenizers must have identical token-to-ID and added-token
 mappings plus matching BOS, EOS, PAD, and UNK IDs. Equal vocabulary sizes alone
 are not sufficient.
@@ -94,9 +101,10 @@ wait on their transfer events. Timing events and NVTX ranges expose operation
 boundaries to profilers. Full-device synchronization is reserved for explicit
 benchmark boundaries.
 
-The current Hugging Face integration is still stateless: every forward receives
-the full context with `use_cache=False`, and probability rows return to the CPU
-for exact sampling. The Stage 4 cache is not consumed by model execution yet.
+The Hugging Face integration reuses standard `past_key_values` and sends only
+uncached suffix tokens after prefill. Probability rows still return to the CPU
+for exact sampling. The Stage 4 paged INT8 cache is not consumed by model
+execution yet; `--no-kv-cache` retains stateless full-context execution.
 
 ## Benchmark contract
 
@@ -124,7 +132,7 @@ comparison but are not isolated total model-footprint measurements.
 - A target adapter that verifies a proposal in one batched forward pass.
 - Lazy PyTorch/Transformers loading with independent device placement.
 - Token streaming and CLI configuration.
-- Stateless full-context execution; cache reuse remains intentionally deferred.
+- Stateless full-context reference path remains available.
 
 ### Stage 3: Native verification — complete
 
@@ -148,6 +156,9 @@ comparison but are not isolated total model-footprint measurements.
   metadata.
 - Implemented: fair target-only/speculative warmup, throughput, latency, memory,
   and JSON reporting harness.
-- Pending: cache-aware model forwards and device-resident sampling/verification.
+- Implemented: Hugging Face `past_key_values` prefill/reuse, speculative suffix
+  cropping, correction replay, and request-boundary resets.
+- Pending: Stage 4 paged INT8 cache integration and device-resident
+  sampling/verification.
 - Pending: custom CUDA PagedAttention and INT8 cache kernels.
 - Pending: benchmark and quality evidence from documented NVIDIA hardware.

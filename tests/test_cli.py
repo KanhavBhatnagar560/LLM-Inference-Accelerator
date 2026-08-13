@@ -22,6 +22,7 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(args.draft_model, "draft/model")
         self.assertEqual(args.target_model, "target/model")
+        self.assertFalse(args.no_kv_cache)
 
     def test_benchmark_arguments_parse_without_loading_optional_dependencies(self) -> None:
         args = build_parser().parse_args(
@@ -41,6 +42,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.prompt, ["hello", "world"])
         self.assertEqual(args.warmup_runs, 2)
         self.assertEqual(args.measured_runs, 10)
+        self.assertFalse(args.no_kv_cache)
 
     def test_demo_runs_without_optional_dependencies(self) -> None:
         output = io.StringIO()

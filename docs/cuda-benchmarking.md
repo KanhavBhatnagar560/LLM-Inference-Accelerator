@@ -6,8 +6,8 @@ still imports and runs without PyTorch, while CUDA behavior is covered by fake
 backend tests on non-NVIDIA development machines.
 
 This milestone does not include a custom CUDA PagedAttention kernel, CUDA INT8
-KV-cache kernel, or measured NVIDIA results. The current Hugging Face adapter
-still performs stateless full-context forwards with `use_cache=False`.
+KV-cache kernel, or measured NVIDIA results. The Hugging Face adapter reuses its
+standard `past_key_values`; it does not consume the custom paged INT8 cache.
 
 ## CUDA runtime
 
@@ -77,7 +77,7 @@ The versioned JSON report contains:
 - warmup count, measured repetitions, and base seed;
 - model IDs and revisions, dtype, device, batch size, and draft-window settings;
 - whether model loading and tokenization are excluded;
-- the current stateless KV-cache mode;
+- the selected Hugging Face KV-cache mode;
 - Python, platform, PyTorch, Transformers, CUDA, driver, GPU, and compute
   capability metadata where available;
 - total generated tokens, elapsed time, throughput, and throughput ratio;
@@ -99,8 +99,9 @@ tokenization, and Hugging Face weight download time are excluded.
 
 The current adapter copies probability rows back to the CPU for exact Python
 sampling, so this is not yet a fully device-resident decoder. Custom CUDA
-PagedAttention, INT8 cache consumption, cache-aware model forwards, batched
-serving, and isolated process-level memory comparisons remain future work.
+PagedAttention, INT8 cache consumption, batched serving, and isolated
+process-level memory comparisons remain future work. Use `--no-kv-cache` when a
+model exposes a cache representation that cannot be cropped safely.
 
 Do not report the project's target throughput, latency, memory, or batch-size
 numbers as achieved until a checked-in JSON report from documented NVIDIA

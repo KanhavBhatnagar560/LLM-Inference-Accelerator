@@ -60,6 +60,12 @@ class _DraftWindow:
             self.size = max(self._config.min_draft_tokens, self.size - 1)
 
 
+def _reset_model_cache(model: ProbabilityModel) -> None:
+    reset = getattr(model, "reset_cache", None)
+    if callable(reset):
+        reset()
+
+
 class SpeculativeDecoder:
     """Generate tokens with exact speculative sampling.
 
@@ -147,6 +153,9 @@ class SpeculativeDecoder:
     ) -> DecodeResult:
         config = self.config
         prompt = self._validate_prompt(prompt_tokens)
+        _reset_model_cache(self.draft_model)
+        if self.target_model is not self.draft_model:
+            _reset_model_cache(self.target_model)
         generated: list[int] = []
         stats = DecodeStats()
         window = _DraftWindow(config)
@@ -292,6 +301,7 @@ class TargetOnlyDecoder:
         on_token: Callable[[TokenEvent], None] | None = None,
     ) -> DecodeResult:
         prompt = self._validate_prompt(prompt_tokens)
+        _reset_model_cache(self.target_model)
         generated: list[int] = []
         stats = DecodeStats()
 

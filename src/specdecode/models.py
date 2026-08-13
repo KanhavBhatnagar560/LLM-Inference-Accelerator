@@ -37,6 +37,13 @@ class ProposalScoringModel(ProbabilityModel, Protocol):
     ) -> Sequence[Sequence[float]]: ...
 
 
+@runtime_checkable
+class CacheAwareProbabilityModel(ProbabilityModel, Protocol):
+    """Optional stateful model whose cache is reset at generation boundaries."""
+
+    def reset_cache(self) -> None: ...
+
+
 class CausalLMProbabilityAdapter(ABC):
     """Turns causal-LM logit positions into the probability model protocol.
 

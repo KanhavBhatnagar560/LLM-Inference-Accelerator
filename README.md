@@ -6,8 +6,9 @@ output distribution.
 
 > **Project status:** Stages 1 through 4 are complete. Stage 5 now has an
 > optional PyTorch CUDA execution layer and a reproducible target-only versus
-> speculative benchmark harness. Custom CUDA attention/quantization kernels,
-> model KV-cache integration, and validated NVIDIA measurements remain pending.
+> speculative benchmark harness. Hugging Face `past_key_values` reuse now avoids
+> full-context recomputation. Custom paged INT8 model-cache integration, CUDA
+> kernels, and validated NVIDIA measurements remain pending.
 
 ## Why start with a reference engine?
 
@@ -24,6 +25,7 @@ Implemented now:
 - one-forward-pass target scoring through an optional proposal interface;
 - lazy PyTorch/Transformers model loading and exact tokenizer compatibility checks;
 - token-level streaming events and a real-model command-line interface;
+- request-local Hugging Face KV-cache reuse with speculative suffix cropping;
 - a versioned native C ABI with dependency-free `ctypes` bindings;
 - automatic native selection with a pure-Python fallback;
 - seeded native/Python parity for tokens, events, statistics, and RNG state;
@@ -67,9 +69,11 @@ Face authentication. Model loading fails early if token-to-ID mappings, special
 tokens, model vocabulary sizes, or embedding ranges are incompatible. Use
 `--chat` for instruction-tuned checkpoints with a chat template.
 
-Stage 2 intentionally performs stateless full-context forwards. It proves real
-model integration and batches target proposal verification, but KV-cache reuse
-inside model execution is deferred to the CUDA integration stage.
+Real-model generation uses Hugging Face `past_key_values` by default. The first
+forward prefills the prompt; later calls score only uncached suffix tokens. After
+a speculative rejection, the adapter crops to the shared prefix and replays the
+correction. Each generation resets request-local state. Pass `--no-kv-cache` to
+retain the stateless full-context reference path.
 
 ## Build the Stage 3/4 native core
 
@@ -103,9 +107,10 @@ atomic multi-token appends, suffix rollback, INT8 K/V storage, and precise forma
 accounting. `PythonKVQuantizer` is the dependency-free oracle;
 `NativeKVQuantizer` runs the matching C++ CPU kernels.
 
-The cache is intentionally standalone in this stage. It is not yet wired into
-Hugging Face `past_key_values` or a CUDA PagedAttention kernel, so its theoretical
-storage ratio must not be reported as measured GPU memory savings.
+The custom paged INT8 cache remains standalone. Real models now reuse the
+standard Hugging Face cache, but they do not store model state in `PagedKVCache`
+or read it through a CUDA PagedAttention kernel. Its theoretical storage ratio
+must not be reported as measured GPU memory savings.
 
 ## Run the Stage 5 benchmark harness
 
@@ -141,8 +146,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 2. **Model integration** — complete; Hugging Face adapters and streaming CLI.
 3. **Native core** — complete; C++ verification/sampling with Python bindings.
 4. **Memory engine** — complete; paged KV blocks and per-head INT8 quantization.
-5. **CUDA pipeline** — in progress; execution/profiling and benchmark foundation
-   implemented, custom kernels and hardware validation pending.
+5. **CUDA pipeline** — in progress; execution/profiling, Hugging Face cache
+   reuse, and benchmark foundation implemented; custom paged INT8 kernels and
+   hardware validation pending.
 
 The target numbers (82 tok/s, 2.4x throughput, 42% lower KV memory, and 42 ms p99
 latency) must be reproduced on a documented GPU and model pair before being

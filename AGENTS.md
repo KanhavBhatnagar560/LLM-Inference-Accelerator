@@ -23,10 +23,10 @@ the Python reference engine's behavior and output distribution.
 
 ## Current repository state
 
-Stages 1 through 4 are complete. The Stage 5 execution and benchmark foundation
-is implemented, while custom CUDA attention/quantization kernels and hardware
-measurements remain pending. The dependency-free Python engine remains the
-oracle, the Hugging Face adapter connects real causal models, a paged cache
+Stages 1 through 4 are complete. Stage 5 includes the execution/benchmark
+foundation and standard Hugging Face `past_key_values` reuse, while custom paged
+INT8 model-cache integration, CUDA kernels, and hardware measurements remain
+pending. The dependency-free Python engine remains the oracle, a paged cache
 reference manages quantized K/V entries, and an optional C++17 shared library
 handles sampling, verification, and INT8 quantization.
 
@@ -48,6 +48,10 @@ Implemented:
 - prompt and optional chat-template encoding;
 - token callbacks identifying accepted, corrected, bonus, and fallback output;
 - a configurable real-model CLI with independent model devices and revisions;
+- Hugging Face prompt prefill and incremental `past_key_values` reuse;
+- longest-common-prefix reconciliation and speculative cache-suffix cropping;
+- correction replay and request-boundary cache resets;
+- a stateless `--no-kv-cache` compatibility/reference path;
 - a CMake-based native library with a stable, versioned C ABI;
 - native normalization, categorical sampling, residual construction, vectorized
   acceptance probabilities, and first-rejection detection;
@@ -72,7 +76,7 @@ Implemented:
 Not implemented yet:
 
 - an HTTP or production serving layer;
-- Hugging Face `past_key_values` reuse and cache integration;
+- integration between Hugging Face model state and the custom `PagedKVCache`;
 - custom CUDA PagedAttention and INT8 quantization kernels;
 - device-resident verification and sampling;
 - shared-prefix cache blocks and copy-on-write serving optimizations;
@@ -185,11 +189,13 @@ The following are non-negotiable invariants:
 
 The sequential Stage 1 path remains available. A target implementing
 `score_proposal()` evaluates all proposal positions and the bonus position in one
-call. Hugging Face execution is currently stateless and uses the full context.
-When explicitly enabled, the adapter stages inputs through reusable pinned and
-device buffers, then runs forwards on named CUDA streams after transfer events.
-The standalone Stage 4 cache can roll back rejected proposal suffixes, but model
-cache integration and custom CUDA kernels remain pending Stage 5 work.
+call. Hugging Face execution prefills the prompt, retains `past_key_values`, and
+forwards only uncached suffix tokens. On divergent speculative state, it crops to
+the longest safe shared prefix and replays the correction/new suffix. Decoders
+reset request-local caches before generation. When CUDA execution is enabled,
+the adapter stages inputs through reusable pinned/device buffers and runs named
+streams after transfer events. The standalone Stage 4 cache remains separate;
+custom paged model-cache integration and CUDA kernels are pending Stage 5 work.
 
 Numerical sampling routes through `SamplingBackend`. Python owns every random
 draw and passes explicit uniforms into either implementation. Native acceptance
@@ -211,6 +217,7 @@ The root package exports:
   fallback counters;
 - `ProbabilityModel` — minimal next-token probability protocol;
 - `ProposalScoringModel` — optional one-call target proposal protocol;
+- `CacheAwareProbabilityModel` — optional request-local cache reset protocol;
 - `CausalLMProbabilityAdapter` — framework-neutral causal-logit alignment base;
 - `TableModel` — deterministic context table used by tests and the demo;
 - `TokenEvent` — one committed token's ID, output index, and source;
@@ -306,7 +313,7 @@ also be used, but standard-library tests must continue to work.
 
 ## Test coverage through the Stage 5 foundation
 
-The 74 current Python tests plus two CTest executables cover:
+The 80 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -336,6 +343,8 @@ The 74 current Python tests plus two CTest executables cover:
 - a direct target-only baseline with streaming and EOS behavior;
 - dependency-free fake-CUDA stream, event, timing, NVTX, and buffer-pool tests;
 - pinned nonblocking transfers and Hugging Face stream integration;
+- Hugging Face prompt prefill, incremental suffix scoring, exact cache-boundary
+  reuse, speculative suffix cropping, correction replay, and cache resets;
 - fair benchmark seeds, alternating order, latency/throughput aggregation,
   allocator peaks, validation, and JSON report contents.
 
@@ -381,7 +390,7 @@ The dependency-free paged cache implements logical-to-physical block tables,
 deterministic allocation/reclamation, atomic append and suffix rollback, per-head
 INT8 metadata, Python and native CPU quantization kernels, reference
 dequantization, format-level memory accounting, and numerical parity tests.
-Hugging Face model cache integration and custom CUDA kernels remain Stage 5 work.
+Custom paged model-cache integration and CUDA kernels remain Stage 5 work.
 
 ### Stage 5 — CUDA execution and benchmarking: in progress
 
@@ -389,10 +398,12 @@ Implemented: reusable device workspaces, pinned host buffers, separate CUDA
 streams with explicit events, timing/NVTX profiling, allocator/environment
 reporting, a direct target-only baseline, and a fair versioned JSON benchmark.
 
-Pending: Hugging Face `past_key_values` reuse, integration with the Stage 4 cache,
-device-resident verification/sampling, custom CUDA PagedAttention and INT8
-quantization kernels, isolated memory/batch testing, and measurements on
-documented NVIDIA hardware.
+Also implemented: Hugging Face `past_key_values` prompt prefill, incremental
+suffix forwards, speculative crop/replay reconciliation, and request resets.
+
+Pending: integration with the Stage 4 paged INT8 cache, device-resident
+verification/sampling, custom CUDA PagedAttention and INT8 quantization kernels,
+isolated memory/batch testing, and measurements on documented NVIDIA hardware.
 
 ## Benchmark reporting rules
 

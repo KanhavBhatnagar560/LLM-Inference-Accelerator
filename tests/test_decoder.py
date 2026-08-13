@@ -16,7 +16,30 @@ class ZeroRandom(random.Random):
         return 0.0
 
 
+class ResettableTableModel(TableModel):
+    def __init__(self, table, default):
+        super().__init__(table, default)
+        self.reset_count = 0
+
+    def reset_cache(self):
+        self.reset_count += 1
+
+
 class DecoderTests(unittest.TestCase):
+    def test_decoders_reset_request_local_model_caches(self) -> None:
+        draft = ResettableTableModel({}, default=(0.0, 1.0))
+        target = ResettableTableModel({}, default=(0.0, 1.0))
+        config = DecodeConfig(max_new_tokens=1)
+
+        speculative = SpeculativeDecoder(draft, target, config)
+        speculative.generate([0])
+        speculative.generate([0])
+        direct = TargetOnlyDecoder(target, config)
+        direct.generate([0])
+
+        self.assertEqual(draft.reset_count, 2)
+        self.assertEqual(target.reset_count, 3)
+
     def test_target_only_baseline_emits_distinct_events_and_stops_at_eos(self) -> None:
         model = TableModel({}, default=(0.0, 1.0))
         events = []

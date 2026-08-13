@@ -41,6 +41,7 @@ from .kv_cache import (
     QuantizedVector,
 )
 from .models import (
+    CacheAwareProbabilityModel,
     CausalLMProbabilityAdapter,
     ProbabilityModel,
     ProposalScoringModel,
@@ -52,6 +53,7 @@ __all__ = [
     "BenchmarkMetrics",
     "BenchmarkReport",
     "BenchmarkSample",
+    "CacheAwareProbabilityModel",
     "CudaDependencyError",
     "CudaExecutionRuntime",
     "CudaMemorySnapshot",

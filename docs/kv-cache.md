@@ -6,9 +6,10 @@ physical-block allocation, logical block tables, speculative-suffix rollback,
 per-head symmetric INT8 quantization, native CPU quantization kernels, and
 format-level memory accounting.
 
-It is not connected to Hugging Face `past_key_values` yet and does not establish
-a GPU memory or latency result. Stage 5 owns model-runtime integration, CUDA
-kernels, asynchronous execution, and measured performance.
+Real-model decoding can now reuse the separate standard Hugging Face
+`past_key_values` representation. This custom paged INT8 layout is not connected
+to those tensors yet and does not establish a GPU memory or latency result.
+Stage 5 still owns paged model-runtime integration, CUDA kernels, and measurement.
 
 ## Tensor and page layout
 

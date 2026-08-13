@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sampling-backend", choices=("auto", "python", "native"), default="auto"
     )
     generate.add_argument("--native-library")
+    generate.add_argument(
+        "--no-kv-cache",
+        action="store_true",
+        help="disable Hugging Face past_key_values reuse",
+    )
     generate.add_argument("--local-files-only", action="store_true")
     generate.add_argument(
         "--trust-remote-code",
@@ -86,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
     )
     benchmark.add_argument("--native-library")
+    benchmark.add_argument(
+        "--no-kv-cache",
+        action="store_true",
+        help="benchmark stateless full-context model forwards",
+    )
     benchmark.add_argument("--local-files-only", action="store_true")
     benchmark.add_argument("--trust-remote-code", action="store_true")
     return parser
@@ -151,6 +161,7 @@ def run_generate(args: argparse.Namespace) -> int:
         dtype=args.dtype,
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
+        use_kv_cache=not args.no_kv_cache,
     )
     prompt_tokens = encode_prompt(pair.tokenizer, args.prompt, chat=args.chat)
     config = DecodeConfig(
@@ -215,6 +226,7 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
         local_files_only=args.local_files_only,
         enable_cuda_runtime=True,
         cuda_device=args.device,
+        use_kv_cache=not args.no_kv_cache,
     )
     if pair.cuda_runtime is None:
         raise RuntimeError("benchmark requested CUDA but no CUDA runtime was configured")
@@ -281,7 +293,11 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
             "temperature": 1.0,
             "model_loading_excluded": True,
             "tokenization_excluded": True,
-            "kv_cache_mode": "stateless_full_context",
+            "kv_cache_mode": (
+                "huggingface_past_key_values"
+                if not args.no_kv_cache
+                else "stateless_full_context"
+            ),
         },
         environment=environment,
         synchronize=pair.cuda_runtime.synchronize,
