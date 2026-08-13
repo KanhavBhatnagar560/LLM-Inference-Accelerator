@@ -53,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable Hugging Face past_key_values reuse",
     )
+    generate.add_argument(
+        "--paged-cache-mirror",
+        action="store_true",
+        help="mirror exact model state into the paged INT8 reference cache",
+    )
+    generate.add_argument("--paged-cache-block-size", type=int, default=16)
+    generate.add_argument("--paged-cache-num-blocks", type=int)
     generate.add_argument("--local-files-only", action="store_true")
     generate.add_argument(
         "--trust-remote-code",
@@ -96,6 +103,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="benchmark stateless full-context model forwards",
     )
+    benchmark.add_argument(
+        "--paged-cache-mirror",
+        action="store_true",
+        help="include paged INT8 shadow-cache conversion",
+    )
+    benchmark.add_argument("--paged-cache-block-size", type=int, default=16)
+    benchmark.add_argument("--paged-cache-num-blocks", type=int)
     benchmark.add_argument("--local-files-only", action="store_true")
     benchmark.add_argument("--trust-remote-code", action="store_true")
     return parser
@@ -148,9 +162,19 @@ def run_demo(
     return 0
 
 
+def _validate_cache_args(args: argparse.Namespace) -> None:
+    if args.no_kv_cache and args.paged_cache_mirror:
+        raise ValueError("--paged-cache-mirror cannot be combined with --no-kv-cache")
+    if args.paged_cache_block_size < 1:
+        raise ValueError("--paged-cache-block-size must be positive")
+    if args.paged_cache_num_blocks is not None and args.paged_cache_num_blocks < 1:
+        raise ValueError("--paged-cache-num-blocks must be positive")
+
+
 def run_generate(args: argparse.Namespace) -> int:
     from .huggingface import HuggingFaceModelPair
 
+    _validate_cache_args(args)
     pair = HuggingFaceModelPair.from_pretrained(
         args.draft_model,
         args.target_model,
@@ -162,6 +186,9 @@ def run_generate(args: argparse.Namespace) -> int:
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
         use_kv_cache=not args.no_kv_cache,
+        mirror_paged_kv_cache=args.paged_cache_mirror,
+        paged_cache_block_size=args.paged_cache_block_size,
+        paged_cache_num_blocks=args.paged_cache_num_blocks,
     )
     prompt_tokens = encode_prompt(pair.tokenizer, args.prompt, chat=args.chat)
     config = DecodeConfig(
@@ -214,6 +241,7 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
     from .decoder import TargetOnlyDecoder
     from .huggingface import HuggingFaceModelPair
 
+    _validate_cache_args(args)
     pair = HuggingFaceModelPair.from_pretrained(
         args.draft_model,
         args.target_model,
@@ -227,6 +255,9 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
         enable_cuda_runtime=True,
         cuda_device=args.device,
         use_kv_cache=not args.no_kv_cache,
+        mirror_paged_kv_cache=args.paged_cache_mirror,
+        paged_cache_block_size=args.paged_cache_block_size,
+        paged_cache_num_blocks=args.paged_cache_num_blocks,
     )
     if pair.cuda_runtime is None:
         raise RuntimeError("benchmark requested CUDA but no CUDA runtime was configured")
@@ -294,9 +325,13 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
             "model_loading_excluded": True,
             "tokenization_excluded": True,
             "kv_cache_mode": (
-                "huggingface_past_key_values"
-                if not args.no_kv_cache
-                else "stateless_full_context"
+                "stateless_full_context"
+                if args.no_kv_cache
+                else (
+                    "huggingface_with_paged_int8_mirror"
+                    if args.paged_cache_mirror
+                    else "huggingface_past_key_values"
+                )
             ),
         },
         environment=environment,

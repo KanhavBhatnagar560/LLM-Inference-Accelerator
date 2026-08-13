@@ -5,10 +5,9 @@ draft model with a larger target model while preserving the target model's exact
 output distribution.
 
 > **Project status:** Stages 1 through 4 are complete. Stage 5 now has an
-> optional PyTorch CUDA execution layer and a reproducible target-only versus
-> speculative benchmark harness. Hugging Face `past_key_values` reuse now avoids
-> full-context recomputation. Custom paged INT8 model-cache integration, CUDA
-> kernels, and validated NVIDIA measurements remain pending.
+> optional PyTorch CUDA execution layer, Hugging Face `past_key_values` reuse,
+> and an opt-in bridge that mirrors real model K/V tensors into the custom paged
+> INT8 cache. The model still uses its exact native cache for attention.
 
 ## Why start with a reference engine?
 
@@ -32,12 +31,11 @@ Implemented now:
 - deterministic logical-to-physical KV block allocation and reclamation;
 - atomic speculative cache appends with checkpoint rollback;
 - per-head symmetric INT8 KV quantization with Python/C++ parity;
-- dequantization error-bound tests and format-level memory accounting;
+- dequantization error-bound tests;
 - separate CUDA draft, target, and transfer streams with event dependencies;
 - reusable device workspaces, pinned host buffers, and nonblocking transfers;
-- optional timing events, NVTX ranges, and CUDA allocator memory snapshots;
-- a direct target-only baseline and versioned JSON comparison reports;
-- deterministic unit tests and an empirical distribution-equivalence test;
+- optional NVTX profiling ranges;
+- deterministic unit tests and distribution-equivalence coverage;
 - zero required third-party Python dependencies.
 
 ## Run the dependency-free demo
@@ -103,36 +101,16 @@ the reference path for a complete process or test run.
 ## Stage 4 cache boundary
 
 `PagedKVCache` provides fixed-pool physical blocks, per-sequence block tables,
-atomic multi-token appends, suffix rollback, INT8 K/V storage, and precise format
-accounting. `PythonKVQuantizer` is the dependency-free oracle;
+atomic multi-token appends, suffix rollback, and INT8 K/V storage.
+`PythonKVQuantizer` is the dependency-free oracle;
 `NativeKVQuantizer` runs the matching C++ CPU kernels.
 
-The custom paged INT8 cache remains standalone. Real models now reuse the
-standard Hugging Face cache, but they do not store model state in `PagedKVCache`
-or read it through a CUDA PagedAttention kernel. Its theoretical storage ratio
-must not be reported as measured GPU memory savings.
-
-## Run the Stage 5 benchmark harness
-
-On an NVIDIA machine with the optional dependencies installed, compare both
-paths under identical prompts, seeds, dtype, device, and sampling settings:
-
-```bash
-specdecode benchmark \
-  --draft-model meta-llama/Llama-3.2-1B \
-  --target-model meta-llama/Llama-3.1-8B \
-  --device cuda:0 \
-  --dtype bfloat16 \
-  --prompt "Explain speculative decoding." \
-  --warmup-runs 2 \
-  --measured-runs 10 \
-  --output outputs/benchmark.json
-```
-
-The report records environment metadata, throughput, token-latency percentiles,
-peak PyTorch CUDA allocator memory, settings, and token hashes. Model loading and
-tokenization are excluded. This harness is implemented, but this repository does
-not yet contain NVIDIA results or evidence for the target performance numbers.
+Real models can mirror their native cache into `PagedKVCache` by adding
+`--paged-cache-mirror`. The bridge converts Hugging Face tensors from
+`[batch, heads, sequence, head_dim]` into per-token paged entries, applies INT8
+quantization, and follows speculative rollback. It intentionally remains a
+shadow cache so quantization cannot alter logits. CUDA PagedAttention will later
+consume the same layout directly.
 
 ## Run tests
 
@@ -146,16 +124,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 2. **Model integration** — complete; Hugging Face adapters and streaming CLI.
 3. **Native core** — complete; C++ verification/sampling with Python bindings.
 4. **Memory engine** — complete; paged KV blocks and per-head INT8 quantization.
-5. **CUDA pipeline** — in progress; execution/profiling, Hugging Face cache
-   reuse, and benchmark foundation implemented; custom paged INT8 kernels and
-   hardware validation pending.
-
-The target numbers (82 tok/s, 2.4x throughput, 42% lower KV memory, and 42 ms p99
-latency) must be reproduced on a documented GPU and model pair before being
-reported as achieved results.
+5. **CUDA pipeline** — in progress; execution/profiling, Hugging Face cache reuse,
+   and paged INT8 shadow-cache integration are implemented.
 
 See [docs/architecture.md](docs/architecture.md) for the evolving design.
 See [docs/native.md](docs/native.md) for the C ABI and backend contract.
 See [docs/kv-cache.md](docs/kv-cache.md) for the Stage 4 memory contract.
-See [docs/cuda-benchmarking.md](docs/cuda-benchmarking.md) for Stage 5 usage and
-measurement limitations.

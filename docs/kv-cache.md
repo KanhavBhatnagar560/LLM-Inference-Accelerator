@@ -6,10 +6,28 @@ physical-block allocation, logical block tables, speculative-suffix rollback,
 per-head symmetric INT8 quantization, native CPU quantization kernels, and
 format-level memory accounting.
 
-Real-model decoding can now reuse the separate standard Hugging Face
-`past_key_values` representation. This custom paged INT8 layout is not connected
-to those tensors yet and does not establish a GPU memory or latency result.
-Stage 5 still owns paged model-runtime integration, CUDA kernels, and measurement.
+Real-model decoding reuses the standard Hugging Face `past_key_values`
+representation. An opt-in Stage 5 mirror now converts those exact model tensors
+into this custom paged INT8 layout and follows cache rollback. The model does not
+consume the quantized shadow during attention yet. Stage 5 still owns CUDA
+PagedAttention kernels and measured performance.
+
+## Hugging Face shadow integration
+
+`HuggingFacePagedCacheMirror` derives layer, KV-head, head-dimension, and capacity
+geometry from a decoder-only model configuration. After each cached forward it:
+
+1. accepts legacy cache tuples or objects exposing `to_legacy_cache()`;
+2. validates batch-one `[batch, heads, sequence, head_dim]` tensors;
+3. extracts only token positions not already present in the mirror;
+4. atomically quantizes and appends those positions to `PagedKVCache`;
+5. validates allocator invariants after every mutation.
+
+When speculative verification discards a suffix, the Hugging Face adapter crops
+its native cache and truncates the mirror to the same logical token count. A new
+request resets both. The mirror is deliberately opt-in with
+`--paged-cache-mirror` because its Python tensor conversion is a correctness
+bridge, not an optimized inference path.
 
 ## Tensor and page layout
 

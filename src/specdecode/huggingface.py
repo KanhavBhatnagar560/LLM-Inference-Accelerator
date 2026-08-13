@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .hf_paged_cache import HuggingFacePagedCacheConfig, HuggingFacePagedCacheMirror
 from .models import CausalLMProbabilityAdapter
 from .tokenizers import validate_tokenizer_compatibility
 
@@ -79,6 +80,7 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         torch_module: Any,
         *,
         use_kv_cache: bool = False,
+        paged_cache_mirror: HuggingFacePagedCacheMirror | None = None,
     ) -> None:
         vocab_size = int(model.config.vocab_size)
         super().__init__(vocab_size)
@@ -86,6 +88,7 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         self.tokenizer = tokenizer
         self._torch = torch_module
         self.use_kv_cache = use_kv_cache
+        self.paged_cache_mirror = paged_cache_mirror
         self.cuda_runtime: Any | None = None
         self.cuda_stream_role = "target"
         self._cache_tokens: tuple[int, ...] = ()
@@ -117,6 +120,9 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         local_files_only: bool = False,
         tokenizer: Any | None = None,
         use_kv_cache: bool = True,
+        mirror_paged_kv_cache: bool = False,
+        paged_cache_block_size: int = 16,
+        paged_cache_num_blocks: int | None = None,
     ) -> "HuggingFaceCausalLM":
         torch, model_class, tokenizer_class, transformers_version = _require_backends()
         common_kwargs = _hub_kwargs(
@@ -132,7 +138,24 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         dtype_key = "dtype" if int(transformers_version.split(".", 1)[0]) >= 5 else "torch_dtype"
         model_kwargs[dtype_key] = _resolve_dtype(torch, dtype)
         model = model_class.from_pretrained(model_id, **model_kwargs)
-        return cls(model, tokenizer, torch, use_kv_cache=use_kv_cache)
+        mirror = None
+        if mirror_paged_kv_cache:
+            if not use_kv_cache:
+                raise ValueError("paged cache mirroring requires Hugging Face KV caching")
+            mirror = HuggingFacePagedCacheMirror.from_model_config(
+                model.config,
+                HuggingFacePagedCacheConfig(
+                    block_size=paged_cache_block_size,
+                    num_blocks=paged_cache_num_blocks,
+                ),
+            )
+        return cls(
+            model,
+            tokenizer,
+            torch,
+            use_kv_cache=use_kv_cache,
+            paged_cache_mirror=mirror,
+        )
 
     @property
     def input_device(self) -> Any:
@@ -163,6 +186,8 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         self._cache_tokens = ()
         self._past_key_values = None
         self._cached_next_probabilities = None
+        if self.paged_cache_mirror is not None:
+            self.paged_cache_mirror.reset()
 
     @staticmethod
     def _common_prefix_length(left: Sequence[int], right: Sequence[int]) -> int:
@@ -226,6 +251,8 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         self._cache_tokens = self._cache_tokens[:length]
         self._past_key_values = past_key_values
         self._cached_next_probabilities = None
+        if self.paged_cache_mirror is not None:
+            self.paged_cache_mirror.truncate(length)
         return past_key_values, length
 
     def _forward(
@@ -348,6 +375,8 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
             output_cache = getattr(outputs, "past_key_values", None)
             if output_cache is None:
                 raise RuntimeError("causal LM did not return past_key_values")
+            if self.paged_cache_mirror is not None:
+                self.paged_cache_mirror.synchronize(output_cache)
             indices = tuple(length - reuse_length - 1 for length in output_lengths)
             rows = self._rows_from_logits(outputs.logits, indices)
             final_row = self._rows_from_logits(
@@ -427,6 +456,9 @@ class HuggingFaceModelPair:
         enable_cuda_runtime: bool = False,
         cuda_device: str | None = None,
         use_kv_cache: bool = True,
+        mirror_paged_kv_cache: bool = False,
+        paged_cache_block_size: int = 16,
+        paged_cache_num_blocks: int | None = None,
     ) -> "HuggingFaceModelPair":
         _, _, tokenizer_class, transformers_version = _require_backends()
         draft_tokenizer = tokenizer_class.from_pretrained(
@@ -460,6 +492,9 @@ class HuggingFaceModelPair:
             local_files_only=local_files_only,
             tokenizer=draft_tokenizer,
             use_kv_cache=use_kv_cache,
+            mirror_paged_kv_cache=mirror_paged_kv_cache,
+            paged_cache_block_size=paged_cache_block_size,
+            paged_cache_num_blocks=paged_cache_num_blocks,
         )
         target = HuggingFaceCausalLM.from_pretrained(
             target_model_id,
@@ -470,6 +505,9 @@ class HuggingFaceModelPair:
             local_files_only=local_files_only,
             tokenizer=target_tokenizer,
             use_kv_cache=use_kv_cache,
+            mirror_paged_kv_cache=mirror_paged_kv_cache,
+            paged_cache_block_size=paged_cache_block_size,
+            paged_cache_num_blocks=paged_cache_num_blocks,
         )
         if draft.vocab_size != target.vocab_size:
             raise ValueError("draft and target model output vocabularies differ")

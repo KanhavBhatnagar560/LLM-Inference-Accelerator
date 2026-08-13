@@ -97,6 +97,22 @@ class FakeCudaRuntime:
         return FakeCudaTask(operation())
 
 
+class FakePagedCacheMirror:
+    def __init__(self):
+        self.synchronized = []
+        self.truncated = []
+        self.resets = 0
+
+    def synchronize(self, cache):
+        self.synchronized.append(cache)
+
+    def truncate(self, length):
+        self.truncated.append(length)
+
+    def reset(self):
+        self.resets += 1
+
+
 class FakeTokenizer:
     bos_token_id = None
     eos_token_id = None
@@ -335,6 +351,25 @@ class HuggingFaceAdapterTests(unittest.TestCase):
         self.assertEqual(model.calls[-1]["input_tokens"], [0, 0])
         self.assertEqual(model.calls[-1]["past_length"], 0)
         self.assertEqual(adapter.cache_stats.cropped_tokens, 6)
+
+    def test_paged_mirror_tracks_model_updates_rollback_and_reset(self) -> None:
+        model = FakeCachedModel()
+        mirror = FakePagedCacheMirror()
+        adapter = HuggingFaceCausalLM(
+            model,
+            FakeTokenizer(),
+            FakeTorch(),
+            use_kv_cache=True,
+            paged_cache_mirror=mirror,
+        )
+        adapter.score_proposal([0, 1], [0, 1])
+
+        adapter.score_proposal([0, 1, 0, 0], [1])
+        adapter.reset_cache()
+
+        self.assertEqual(len(mirror.synchronized), 2)
+        self.assertEqual(mirror.truncated, [3])
+        self.assertEqual(mirror.resets, 1)
 
     def test_pair_rejects_tokenizers_before_loading_model_weights(self) -> None:
         backends = (FakeTorch(), object(), FakeAutoTokenizer, "4.44.2")

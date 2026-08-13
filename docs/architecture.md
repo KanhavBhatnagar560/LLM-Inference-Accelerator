@@ -85,8 +85,8 @@ and rollback clears rejected suffix entries before reclaiming unused blocks.
 Each key and value head is quantized independently with a symmetric INT8 scale.
 `PythonKVQuantizer` is the numerical oracle and `NativeKVQuantizer` exposes the
 matching C++ CPU kernels. The dequantization error bound and format-level byte
-formulas are documented in `docs/kv-cache.md`. This standalone cache is not yet
-connected to Hugging Face model state or CUDA attention.
+formulas are documented in `docs/kv-cache.md`. Hugging Face model state can be
+mirrored into this layout, but CUDA attention does not consume it yet.
 
 ## CUDA execution contract
 
@@ -105,6 +105,13 @@ The Hugging Face integration reuses standard `past_key_values` and sends only
 uncached suffix tokens after prefill. Probability rows still return to the CPU
 for exact sampling. The Stage 4 paged INT8 cache is not consumed by model
 execution yet; `--no-kv-cache` retains stateless full-context execution.
+
+With `--paged-cache-mirror`, each new Hugging Face K/V tensor suffix is also
+converted from `[batch, heads, sequence, head_dim]` into per-token entries in
+`PagedKVCache`. Only unseen tokens are quantized and appended. Cache cropping,
+full refills, and request resets apply the matching truncate/reset operation to
+the mirror. The exact Hugging Face cache remains the attention source, ensuring
+the lossy INT8 shadow cannot change logits or sampling behavior.
 
 ## Benchmark contract
 
@@ -158,7 +165,9 @@ comparison but are not isolated total model-footprint measurements.
   and JSON reporting harness.
 - Implemented: Hugging Face `past_key_values` prefill/reuse, speculative suffix
   cropping, correction replay, and request-boundary resets.
-- Pending: Stage 4 paged INT8 cache integration and device-resident
+- Implemented: opt-in model-state conversion into the Stage 4 paged INT8 layout,
+  including incremental append and speculative rollback synchronization.
+- Pending: consuming paged INT8 state during attention and device-resident
   sampling/verification.
 - Pending: custom CUDA PagedAttention and INT8 cache kernels.
 - Pending: benchmark and quality evidence from documented NVIDIA hardware.

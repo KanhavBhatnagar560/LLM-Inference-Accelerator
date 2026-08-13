@@ -24,11 +24,11 @@ the Python reference engine's behavior and output distribution.
 ## Current repository state
 
 Stages 1 through 4 are complete. Stage 5 includes the execution/benchmark
-foundation and standard Hugging Face `past_key_values` reuse, while custom paged
-INT8 model-cache integration, CUDA kernels, and hardware measurements remain
-pending. The dependency-free Python engine remains the oracle, a paged cache
-reference manages quantized K/V entries, and an optional C++17 shared library
-handles sampling, verification, and INT8 quantization.
+foundation, standard Hugging Face `past_key_values` reuse, and an opt-in shadow
+bridge from real model tensors into `PagedKVCache`. Custom paged INT8 attention
+consumption, CUDA kernels, and hardware measurements remain pending. The
+dependency-free Python engine remains the oracle, and an optional C++17 shared
+library handles sampling, verification, and INT8 quantization.
 
 Implemented:
 
@@ -52,6 +52,10 @@ Implemented:
 - longest-common-prefix reconciliation and speculative cache-suffix cropping;
 - correction replay and request-boundary cache resets;
 - a stateless `--no-kv-cache` compatibility/reference path;
+- model-derived paged-cache geometry for Llama-style decoder configurations;
+- batch-one Hugging Face KV tensor validation and per-token layout conversion;
+- incremental model-state mirroring into the paged INT8 cache;
+- synchronized native-cache/paged-mirror rollback and request resets;
 - a CMake-based native library with a stable, versioned C ABI;
 - native normalization, categorical sampling, residual construction, vectorized
   acceptance probabilities, and first-rejection detection;
@@ -76,7 +80,7 @@ Implemented:
 Not implemented yet:
 
 - an HTTP or production serving layer;
-- integration between Hugging Face model state and the custom `PagedKVCache`;
+- model attention that consumes the custom `PagedKVCache` representation;
 - custom CUDA PagedAttention and INT8 quantization kernels;
 - device-resident verification and sampling;
 - shared-prefix cache blocks and copy-on-write serving optimizations;
@@ -114,6 +118,7 @@ Do not describe a planned feature or target metric as completed.
 │   ├── cuda.py                  optional streams, events, buffers, profiling
 │   ├── decoder.py               exact speculative-decoding loop
 │   ├── events.py                typed streaming token events
+│   ├── hf_paged_cache.py        Hugging Face to paged INT8 shadow bridge
 │   ├── huggingface.py           optional PyTorch/Transformers adapter
 │   ├── kv_cache.py              paged INT8 KV-cache correctness engine
 │   ├── models.py                sequential and batched model protocols
@@ -126,6 +131,7 @@ Do not describe a planned feature or target metric as completed.
     ├── test_cuda.py             dependency-free fake-CUDA runtime tests
     ├── test_decoder.py          decoder correctness and distribution tests
     ├── test_huggingface.py      dependency-free adapter component test
+    ├── test_hf_paged_cache.py   model-tensor layout and mirror lifecycle tests
     ├── test_kv_cache.py         paging, rollback, quantization, accounting tests
     ├── test_streaming.py        event and prompt validation tests
     └── ...                      CLI, tokenizer, and sampling tests
@@ -195,7 +201,9 @@ the longest safe shared prefix and replays the correction/new suffix. Decoders
 reset request-local caches before generation. When CUDA execution is enabled,
 the adapter stages inputs through reusable pinned/device buffers and runs named
 streams after transfer events. The standalone Stage 4 cache remains separate;
-custom paged model-cache integration and CUDA kernels are pending Stage 5 work.
+an opt-in mirror now converts real K/V suffixes into its layout and follows
+rollback. Exact native model state remains the attention source. Custom paged
+attention consumption and CUDA kernels are pending Stage 5 work.
 
 Numerical sampling routes through `SamplingBackend`. Python owns every random
 draw and passes explicit uniforms into either implementation. Native acceptance
@@ -218,6 +226,10 @@ The root package exports:
 - `ProbabilityModel` — minimal next-token probability protocol;
 - `ProposalScoringModel` — optional one-call target proposal protocol;
 - `CacheAwareProbabilityModel` — optional request-local cache reset protocol;
+- `HuggingFacePagedCacheConfig` and `HuggingFacePagedCacheMirror` — model-derived
+  geometry and batch-one native-to-paged K/V shadow synchronization;
+- `HuggingFacePagedCacheMirrorStats` — synchronized, rollback, reset, allocator,
+  and compact-format accounting;
 - `CausalLMProbabilityAdapter` — framework-neutral causal-logit alignment base;
 - `TableModel` — deterministic context table used by tests and the demo;
 - `TokenEvent` — one committed token's ID, output index, and source;
@@ -313,7 +325,7 @@ also be used, but standard-library tests must continue to work.
 
 ## Test coverage through the Stage 5 foundation
 
-The 80 current Python tests plus two CTest executables cover:
+The 88 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -345,6 +357,8 @@ The 80 current Python tests plus two CTest executables cover:
 - pinned nonblocking transfers and Hugging Face stream integration;
 - Hugging Face prompt prefill, incremental suffix scoring, exact cache-boundary
   reuse, speculative suffix cropping, correction replay, and cache resets;
+- model-derived paged-cache geometry, Hugging Face tensor-layout validation,
+  incremental INT8 shadow synchronization, and matching rollback/reset behavior;
 - fair benchmark seeds, alternating order, latency/throughput aggregation,
   allocator peaks, validation, and JSON report contents.
 
@@ -390,7 +404,7 @@ The dependency-free paged cache implements logical-to-physical block tables,
 deterministic allocation/reclamation, atomic append and suffix rollback, per-head
 INT8 metadata, Python and native CPU quantization kernels, reference
 dequantization, format-level memory accounting, and numerical parity tests.
-Custom paged model-cache integration and CUDA kernels remain Stage 5 work.
+Custom paged-cache attention consumption and CUDA kernels remain Stage 5 work.
 
 ### Stage 5 — CUDA execution and benchmarking: in progress
 
@@ -401,9 +415,14 @@ reporting, a direct target-only baseline, and a fair versioned JSON benchmark.
 Also implemented: Hugging Face `past_key_values` prompt prefill, incremental
 suffix forwards, speculative crop/replay reconciliation, and request resets.
 
-Pending: integration with the Stage 4 paged INT8 cache, device-resident
-verification/sampling, custom CUDA PagedAttention and INT8 quantization kernels,
-isolated memory/batch testing, and measurements on documented NVIDIA hardware.
+Also implemented: an opt-in batch-one bridge that mirrors exact Hugging Face K/V
+suffixes into `PagedKVCache` and synchronizes speculative rollback. The model
+continues using exact native state for attention.
+
+Pending: consuming the Stage 4 paged INT8 representation during attention,
+device-resident verification/sampling, custom CUDA PagedAttention and INT8
+quantization kernels, isolated memory/batch testing, and measurements on
+documented NVIDIA hardware.
 
 ## Benchmark reporting rules
 

@@ -27,6 +27,12 @@ from .cuda import (
 )
 from .decoder import DecodeResult, DecodeStats, SpeculativeDecoder, TargetOnlyDecoder
 from .events import TokenEvent, TokenSource
+from .hf_paged_cache import (
+    HuggingFacePagedCacheConfig,
+    HuggingFacePagedCacheError,
+    HuggingFacePagedCacheMirror,
+    HuggingFacePagedCacheMirrorStats,
+)
 from .kv_cache import (
     DequantizedKVToken,
     KVCacheCapacityError,
@@ -74,6 +80,10 @@ __all__ = [
     "KVCacheStats",
     "KVQuantizer",
     "GenerationRunner",
+    "HuggingFacePagedCacheConfig",
+    "HuggingFacePagedCacheError",
+    "HuggingFacePagedCacheMirror",
+    "HuggingFacePagedCacheMirrorStats",
     "PagedKVCache",
     "PythonSamplingBackend",
     "PythonKVQuantizer",

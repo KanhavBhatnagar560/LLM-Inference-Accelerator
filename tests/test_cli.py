@@ -23,6 +23,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.draft_model, "draft/model")
         self.assertEqual(args.target_model, "target/model")
         self.assertFalse(args.no_kv_cache)
+        self.assertFalse(args.paged_cache_mirror)
 
     def test_benchmark_arguments_parse_without_loading_optional_dependencies(self) -> None:
         args = build_parser().parse_args(
@@ -43,6 +44,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.warmup_runs, 2)
         self.assertEqual(args.measured_runs, 10)
         self.assertFalse(args.no_kv_cache)
+        self.assertFalse(args.paged_cache_mirror)
+
+    def test_conflicting_cache_modes_fail_before_model_loading(self) -> None:
+        error_output = io.StringIO()
+        arguments = [
+            "generate",
+            "--draft-model",
+            "draft/model",
+            "--target-model",
+            "target/model",
+            "--prompt",
+            "hello",
+            "--no-kv-cache",
+            "--paged-cache-mirror",
+        ]
+        with contextlib.redirect_stderr(error_output):
+            with self.assertRaises(SystemExit) as raised:
+                main(arguments)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("cannot be combined", error_output.getvalue())
 
     def test_demo_runs_without_optional_dependencies(self) -> None:
         output = io.StringIO()
