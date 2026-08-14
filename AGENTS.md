@@ -27,8 +27,10 @@ Stages 1 through 4 are complete. Stage 5 includes the execution/benchmark
 foundation, standard Hugging Face `past_key_values` reuse, and an opt-in shadow
 bridge from real model tensors into `PagedKVCache`. An opt-in reference path now
 reconstructs Hugging Face cache tensors from paged INT8 state and consumes them
-during attention. Direct paged INT8 attention, CUDA kernels, and hardware
-measurements remain pending. The
+during attention. Persistent packed CUDA buffers now mirror one reference-cache
+sequence into physical-page order with incremental suffix transfer and rollback
+clearing. Direct paged INT8 attention, CUDA kernels, and hardware measurements
+remain pending. The
 dependency-free Python engine remains the oracle, and an optional C++17 shared
 library handles sampling, verification, and INT8 quantization.
 
@@ -77,6 +79,9 @@ Implemented:
 - dedicated draft, target, and transfer streams with explicit event dependencies;
 - geometric device-workspace and pinned-host-buffer reuse;
 - nonblocking host-to-device copies, timing events, and NVTX profiling ranges;
+- persistent packed CUDA INT8 K/V and float32 scale storage;
+- incremental changed-suffix transfer, device block-table views, and
+  rollback-safe physical-slot clearing;
 - CUDA allocator snapshots and reproducible environment metadata;
 - identical-seed target/speculative warmup and measured comparisons;
 - versioned JSON throughput, latency-percentile, memory, and token-hash reports.
@@ -120,6 +125,7 @@ Do not describe a planned feature or target metric as completed.
 │   ├── cli.py                   toy and real-model command-line interface
 │   ├── config.py                immutable decoding configuration
 │   ├── cuda.py                  optional streams, events, buffers, profiling
+│   ├── cuda_kv_cache.py         packed CUDA paged-cache storage boundary
 │   ├── decoder.py               exact speculative-decoding loop
 │   ├── events.py                typed streaming token events
 │   ├── hf_paged_cache.py        Hugging Face to paged INT8 shadow bridge
@@ -251,6 +257,9 @@ The root package exports:
   cache data records;
 - `CudaRuntimeConfig`, `CudaExecutionRuntime`, `CudaTask`, `CudaRuntimeStats`, and
   `CudaMemorySnapshot` — lazy optional CUDA scheduling and profiling interfaces;
+- `CudaPagedKVCacheStorage`, `CudaPagedKVCacheView`, and
+  `CudaPagedKVCacheStats` — persistent physical-page CUDA storage,
+  synchronization, and accounting interfaces;
 - `BenchmarkConfig`, `BenchmarkSample`, `BenchmarkMetrics`, and `BenchmarkReport`
   — reproducible comparison configuration and results;
 - `DecoderBenchmarkRunner` and `run_comparison_benchmark` — adapters and the fair
@@ -331,7 +340,7 @@ also be used, but standard-library tests must continue to work.
 
 ## Test coverage through the Stage 5 foundation
 
-The 94 current Python tests plus two CTest executables cover:
+The 99 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -360,6 +369,8 @@ The 94 current Python tests plus two CTest executables cover:
 - used-versus-allocated compact-format memory accounting;
 - a direct target-only baseline with streaming and EOS behavior;
 - dependency-free fake-CUDA stream, event, timing, NVTX, and buffer-pool tests;
+- packed device-page layout, incremental cache upload, rollback clearing, and
+  physical-slot reuse between synchronizations;
 - pinned nonblocking transfers and Hugging Face stream integration;
 - Hugging Face prompt prefill, incremental suffix scoring, exact cache-boundary
   reuse, speculative suffix cropping, correction replay, and cache resets;
@@ -430,6 +441,10 @@ continues using exact native state for attention by default.
 Also implemented: an opt-in reference path that reconstructs standard Hugging
 Face tensors from the paged INT8 state and consumes them during attention. It is
 a correctness/profiling bridge, not a compact CUDA execution path.
+
+Also implemented: persistent packed CUDA K/V and scale storage with a device
+block-table view, stable-prefix detection, suffix-only transfer, and
+rollback-safe clearing. This is the kernel input boundary, not attention itself.
 
 Pending: consuming packed Stage 4 state directly during attention,
 device-resident verification/sampling, custom CUDA PagedAttention and INT8

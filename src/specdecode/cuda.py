@@ -130,6 +130,12 @@ class CudaExecutionRuntime:
     def streams(self) -> Mapping[str, Any]:
         return dict(self._streams)
 
+    @property
+    def torch_module(self) -> Any:
+        """Return the lazily supplied PyTorch module for CUDA integrations."""
+
+        return self._torch
+
     @staticmethod
     def _shape(shape: Sequence[int]) -> tuple[int, ...]:
         if any(

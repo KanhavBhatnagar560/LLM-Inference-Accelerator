@@ -8,8 +8,9 @@ output distribution.
 > optional PyTorch CUDA execution layer, Hugging Face `past_key_values` reuse,
 > and an opt-in bridge that mirrors real model K/V tensors into the custom paged
 > INT8 cache. An additional reference mode dequantizes that paged state back
-> into Hugging Face tensors and consumes it during attention. Custom CUDA
-> PagedAttention remains pending.
+> into Hugging Face tensors and consumes it during attention. A persistent
+> packed CUDA storage boundary now exposes INT8 pages, scales, and block tables
+> for a future kernel. Custom CUDA PagedAttention remains pending.
 
 ## Why start with a reference engine?
 
@@ -38,6 +39,8 @@ Implemented now:
 - opt-in attention forwards that consume the reconstructed reference cache;
 - separate CUDA draft, target, and transfer streams with event dependencies;
 - reusable device workspaces, pinned host buffers, and nonblocking transfers;
+- persistent packed CUDA INT8 pages with incremental synchronization and
+  rollback-safe slot clearing;
 - optional NVTX profiling ranges;
 - deterministic unit tests and distribution-equivalence coverage;
 - zero required third-party Python dependencies.
@@ -133,6 +136,15 @@ paged cache's logical state, but it is intentionally slow, retains the standard
 Hugging Face output cache, and may perturb logits because the K/V state is INT8.
 It is not the custom CUDA PagedAttention implementation or a performance path.
 
+`CudaPagedKVCacheStorage` provides the next kernel-facing boundary. It packs one
+logical sequence into persistent CUDA tensors with
+`[physical_block, block_offset, layer, head, head_dim]` key/value layout, keeps
+the active logical-to-physical block table on device, uploads only a changed
+suffix, and clears released slots after rollback. The current implementation
+quantizes through the CPU reference cache and is not yet wired into model
+attention; it establishes storage and synchronization semantics for the custom
+kernel milestone.
+
 ## Run tests
 
 ```bash
@@ -146,7 +158,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 3. **Native core** — complete; C++ verification/sampling with Python bindings.
 4. **Memory engine** — complete; paged KV blocks and per-head INT8 quantization.
 5. **CUDA pipeline** — in progress; execution/profiling, Hugging Face cache reuse,
-   paged INT8 mirroring, and reference attention consumption are implemented.
+   paged INT8 mirroring, reference attention consumption, and a packed
+   device-storage boundary are implemented.
 
 See [docs/architecture.md](docs/architecture.md) for the evolving design.
 See [docs/native.md](docs/native.md) for the C ABI and backend contract.

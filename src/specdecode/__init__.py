@@ -25,6 +25,12 @@ from .cuda import (
     CudaTask,
     CudaUnavailableError,
 )
+from .cuda_kv_cache import (
+    CudaPagedKVCacheError,
+    CudaPagedKVCacheStats,
+    CudaPagedKVCacheStorage,
+    CudaPagedKVCacheView,
+)
 from .decoder import DecodeResult, DecodeStats, SpeculativeDecoder, TargetOnlyDecoder
 from .events import TokenEvent, TokenSource
 from .hf_paged_cache import (
@@ -63,6 +69,10 @@ __all__ = [
     "CudaDependencyError",
     "CudaExecutionRuntime",
     "CudaMemorySnapshot",
+    "CudaPagedKVCacheError",
+    "CudaPagedKVCacheStats",
+    "CudaPagedKVCacheStorage",
+    "CudaPagedKVCacheView",
     "CudaRuntimeConfig",
     "CudaRuntimeStats",
     "CudaTask",

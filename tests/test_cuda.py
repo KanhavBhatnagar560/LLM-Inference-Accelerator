@@ -7,6 +7,8 @@ from specdecode.cuda import (
     CudaRuntimeConfig,
     CudaUnavailableError,
 )
+from specdecode.cuda_kv_cache import CudaPagedKVCacheError, CudaPagedKVCacheStorage
+from specdecode.kv_cache import KVCacheConfig, PagedKVCache
 
 
 class FakeDevice:
@@ -45,6 +47,31 @@ class FakeTensor:
     def copy_(self, source, non_blocking=False):
         self.data = list(source.data)
         self.copy_calls.append(non_blocking)
+        return self
+
+    def index_copy_(self, dimension, indices, source):
+        if dimension != 0:
+            raise ValueError("fake tensor only supports dimension-zero index_copy_")
+        row_size = 1
+        for size in self.shape[1:]:
+            row_size *= size
+        for source_row, target_row in enumerate(indices.data):
+            source_start = source_row * row_size
+            target_start = target_row * row_size
+            self.data[target_start : target_start + row_size] = source.data[
+                source_start : source_start + row_size
+            ]
+        return self
+
+    def index_fill_(self, dimension, indices, value):
+        if dimension != 0:
+            raise ValueError("fake tensor only supports dimension-zero index_fill_")
+        row_size = 1
+        for size in self.shape[1:]:
+            row_size *= size
+        for target_row in indices.data:
+            target_start = target_row * row_size
+            self.data[target_start : target_start + row_size] = [value] * row_size
         return self
 
 
@@ -144,6 +171,8 @@ class FakeCuda:
 
 class FakeTorch:
     __version__ = "2.fake"
+    float32 = "float32"
+    int8 = "int8"
     long = "int64"
     version = SimpleNamespace(cuda="12.4")
 
@@ -160,8 +189,24 @@ class FakeTorch:
         return tensor
 
     def tensor(self, values, *, dtype, device):
-        flat = [value for row in values for value in row]
-        return FakeTensor((len(values), len(values[0])), dtype, device, flat)
+        def shape_of(value):
+            shape = []
+            while isinstance(value, (list, tuple)):
+                shape.append(len(value))
+                if not value:
+                    break
+                value = value[0]
+            return tuple(shape)
+
+        def flatten(value):
+            if not isinstance(value, (list, tuple)):
+                return [value]
+            result = []
+            for item in value:
+                result.extend(flatten(item))
+            return result
+
+        return FakeTensor(shape_of(values), dtype, device, flatten(values))
 
 
 class CudaRuntimeTests(unittest.TestCase):
@@ -268,6 +313,110 @@ class CudaRuntimeTests(unittest.TestCase):
         runtime = CudaExecutionRuntime(torch_module=FakeTorch())
         with self.assertRaises(ValueError):
             runtime.stage_token_ids("tokens", ())
+
+
+class CudaPagedKVCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = KVCacheConfig(
+            num_layers=1,
+            num_heads=1,
+            head_dim=2,
+            block_size=2,
+            num_blocks=3,
+        )
+        self.cache = PagedKVCache(self.config)
+        self.cache.create_sequence("model")
+        self.runtime = CudaExecutionRuntime(torch_module=FakeTorch())
+        self.storage = CudaPagedKVCacheStorage(self.config, self.runtime)
+
+    @staticmethod
+    def entry(seed):
+        keys = (((float(seed), float(-seed)),),)
+        values = (((float(seed + 1), float(seed + 2)),),)
+        return keys, values
+
+    def append(self, *seeds):
+        self.cache.append_many(
+            "model",
+            tuple(self.entry(seed) for seed in seeds),
+        )
+
+    def test_packs_physical_layout_and_block_table(self) -> None:
+        self.append(1, 2, 3)
+
+        view = self.storage.synchronize(self.cache, "model").wait()
+
+        self.assertEqual(view.keys.shape, (3, 2, 1, 1, 2))
+        self.assertEqual(view.key_scales.shape, (3, 2, 1, 1))
+        self.assertEqual(view.block_table.data, [0, 1])
+        self.assertEqual(view.token_count, 3)
+        expected_keys = []
+        for index in range(3):
+            expected_keys.extend(
+                self.cache.read_quantized_token("model", index).keys[0][0].values
+            )
+        self.assertEqual(view.keys.data[:6], expected_keys)
+        stats = self.storage.stats
+        self.assertEqual(stats.synchronizations, 1)
+        self.assertEqual(stats.uploaded_tokens, 3)
+        self.assertEqual(stats.active_tokens, 3)
+        self.assertEqual(stats.active_blocks, 2)
+        self.assertEqual(
+            stats.device_storage_bytes,
+            self.config.capacity_tokens * self.config.quantized_bytes_per_token,
+        )
+
+    def test_incremental_sync_uploads_only_changed_suffix(self) -> None:
+        self.append(1, 2)
+        self.storage.synchronize(self.cache, "model").wait()
+        self.append(3)
+
+        view = self.storage.synchronize(self.cache, "model").wait()
+
+        self.assertEqual(view.token_count, 3)
+        self.assertEqual(self.storage.stats.synchronizations, 2)
+        self.assertEqual(self.storage.stats.uploaded_tokens, 3)
+
+    def test_rollback_clears_released_physical_slots(self) -> None:
+        self.append(1, 2, 3, 4)
+        self.storage.synchronize(self.cache, "model").wait()
+        self.cache.truncate("model", 1)
+
+        view = self.storage.synchronize(self.cache, "model").wait()
+
+        self.assertEqual(view.token_count, 1)
+        self.assertEqual(view.block_table.data, [0])
+        self.assertEqual(view.keys.data[2:8], [0] * 6)
+        self.assertEqual(self.storage.stats.cleared_tokens, 3)
+
+    def test_rewrites_reused_slots_after_unsynchronized_rollback(self) -> None:
+        self.append(1, 2, 3)
+        self.storage.synchronize(self.cache, "model").wait()
+        self.cache.truncate("model", 1)
+        self.append(8, 9)
+
+        view = self.storage.synchronize(self.cache, "model").wait()
+
+        expected_keys = []
+        for index in range(3):
+            expected_keys.extend(
+                self.cache.read_quantized_token("model", index).keys[0][0].values
+            )
+        self.assertEqual(view.keys.data[:6], expected_keys)
+        self.assertEqual(self.storage.stats.uploaded_tokens, 5)
+
+    def test_rejects_config_mismatch_and_second_sequence(self) -> None:
+        incompatible = PagedKVCache(
+            KVCacheConfig(num_layers=1, num_heads=1, head_dim=3)
+        )
+        incompatible.create_sequence("model")
+        with self.assertRaises(CudaPagedKVCacheError):
+            self.storage.synchronize(incompatible, "model")
+
+        self.storage.synchronize(self.cache, "model").wait()
+        self.cache.create_sequence("other")
+        with self.assertRaises(CudaPagedKVCacheError):
+            self.storage.synchronize(self.cache, "other")
 
 
 if __name__ == "__main__":

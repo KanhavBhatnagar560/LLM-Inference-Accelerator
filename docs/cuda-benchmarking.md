@@ -11,6 +11,13 @@ standard `past_key_values`. It can mirror them into the custom paged INT8 cache,
 and an opt-in reference mode can dequantize that state back into standard tensors
 for attention. Direct paged attention remains pending.
 
+The repository also exposes `CudaPagedKVCacheStorage`, a kernel-facing packed
+device layout for one reference-cache sequence. It keeps INT8 keys/values,
+float32 per-head scales, and the active block table on CUDA, incrementally
+uploads changed suffixes, and clears released slots. It is tested as storage and
+synchronization infrastructure only; the benchmark CLI does not use it for
+attention and no speedup is attributed to it.
+
 ## CUDA runtime
 
 `CudaExecutionRuntime` owns one device's reusable resources:

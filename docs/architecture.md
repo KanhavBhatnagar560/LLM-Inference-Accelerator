@@ -102,6 +102,13 @@ wait on their transfer events. Timing events and NVTX ranges expose operation
 boundaries to profilers. Full-device synchronization is reserved for explicit
 benchmark boundaries.
 
+`CudaPagedKVCacheStorage` owns persistent INT8 K/V and float32 scale workspaces
+in physical-page order plus an active device block table. Synchronization reads
+the dependency-free cache oracle, finds the stable logical prefix, uploads only
+the changed suffix on the transfer stream, and zeroes physical slots released
+by rollback. The resulting `CudaPagedKVCacheView` is a kernel-facing contract;
+no model attention kernel consumes it yet.
+
 The Hugging Face integration reuses standard `past_key_values` and sends only
 uncached suffix tokens after prefill. Probability rows still return to the CPU
 for exact sampling. `--no-kv-cache` retains stateless full-context execution.
@@ -178,6 +185,8 @@ comparison but are not isolated total model-footprint measurements.
   including incremental append and speculative rollback synchronization.
 - Implemented: opt-in reference attention consumption by reconstructing standard
   Hugging Face cache tensors from paged INT8 state.
+- Implemented: persistent packed CUDA K/V and scale storage, device block-table
+  transfer, changed-suffix upload, and rollback-safe slot clearing.
 - Pending: direct paged INT8 attention consumption and device-resident
   sampling/verification without Python materialization.
 - Pending: custom CUDA PagedAttention and INT8 cache kernels.

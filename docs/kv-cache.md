@@ -50,6 +50,27 @@ dequantization and tensor construction in Python, and INT8 reconstruction can
 change logits. Custom CUDA kernels must be evaluated against this path's layout
 and against the exact Hugging Face baseline.
 
+## Packed CUDA storage boundary
+
+`CudaPagedKVCacheStorage` mirrors one `PagedKVCache` sequence into persistent
+CUDA tensors. Keys and values use:
+
+```text
+[physical_block, block_offset, layer, head, head_dim]
+```
+
+The float32 scale tensors omit `head_dim`, and the active device block table maps
+logical blocks to the physical-block dimension. Each synchronization compares
+the physical slot and quantized value at every retained position, preserves the
+longest stable prefix, uploads only the changed suffix through pinned transfer
+buffers, and clears slots that stopped being live. Comparing values as well as
+slot IDs handles rollback followed by reuse before the next synchronization.
+
+One storage object binds to one logical sequence so a later kernel cannot
+silently consume another request's pages. This boundary does not quantize on the
+GPU and is not connected to Hugging Face attention yet; those are separate Stage
+5 milestones.
+
 ## Tensor and page layout
 
 One cache token contains keys and values in this logical shape:
