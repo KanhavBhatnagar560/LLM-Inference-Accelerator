@@ -41,6 +41,7 @@ class HuggingFacePagedCacheMirrorStats:
     synchronized_tokens: int
     rollback_tokens: int
     resets: int
+    materializations: int
     paged_cache: KVCacheStats
 
 
@@ -72,6 +73,7 @@ class HuggingFacePagedCacheMirror:
         self._synchronized_tokens = 0
         self._rollback_tokens = 0
         self._resets = 0
+        self._materializations = 0
 
     @classmethod
     def from_model_config(
@@ -140,6 +142,7 @@ class HuggingFacePagedCacheMirror:
             synchronized_tokens=self._synchronized_tokens,
             rollback_tokens=self._rollback_tokens,
             resets=self._resets,
+            materializations=self._materializations,
             paged_cache=self.cache.stats(),
         )
 
@@ -227,6 +230,108 @@ class HuggingFacePagedCacheMirror:
         self._synchronized_tokens += appended
         self.cache.validate_invariants()
         return appended
+
+    @staticmethod
+    def _tensor_kwargs(template: Any | None) -> dict[str, Any]:
+        if template is None:
+            return {}
+        kwargs: dict[str, Any] = {}
+        device = getattr(template, "device", None)
+        dtype = getattr(template, "dtype", None)
+        if device is not None:
+            kwargs["device"] = device
+        if dtype is not None:
+            kwargs["dtype"] = dtype
+        return kwargs
+
+    def materialize_legacy_cache(
+        self,
+        torch_module: Any,
+        *,
+        template: Any | None = None,
+    ) -> tuple[tuple[Any, Any], ...]:
+        """Dequantize the paged state into legacy Hugging Face KV tensors.
+
+        The result uses ``[batch, heads, sequence, head_dim]`` layout with a
+        batch size of one. When a template cache is supplied, each reconstructed
+        tensor inherits the corresponding device and dtype. This deliberately
+        slow reference path defines the tensor contract for future CUDA kernels.
+        """
+
+        tensor = getattr(torch_module, "tensor", None)
+        empty = getattr(torch_module, "empty", None)
+        if not callable(tensor) or not callable(empty):
+            raise HuggingFacePagedCacheError(
+                "torch_module must provide callable tensor() and empty() factories"
+            )
+
+        template_layers: tuple[Any, ...] | None = None
+        if template is not None:
+            template_layers = self._legacy_layers(template)
+            self._validate_layers(template_layers)
+
+        config = self.cache.config
+        tokens = self.cache.read_sequence(self._SEQUENCE_ID)
+        layers: list[tuple[Any, Any]] = []
+        for layer_index in range(config.num_layers):
+            key_template = None
+            value_template = None
+            if template_layers is not None:
+                key_template = template_layers[layer_index][0]
+                value_template = template_layers[layer_index][1]
+
+            if tokens:
+                keys = [
+                    [
+                        list(token.keys[layer_index][head_index])
+                        for token in tokens
+                    ]
+                    for head_index in range(config.num_heads)
+                ]
+                values = [
+                    [
+                        list(token.values[layer_index][head_index])
+                        for token in tokens
+                    ]
+                    for head_index in range(config.num_heads)
+                ]
+                key_tensor = tensor(
+                    [keys],
+                    **self._tensor_kwargs(key_template),
+                )
+                value_tensor = tensor(
+                    [values],
+                    **self._tensor_kwargs(value_template),
+                )
+            else:
+                shape = (1, config.num_heads, 0, config.head_dim)
+                key_tensor = empty(shape, **self._tensor_kwargs(key_template))
+                value_tensor = empty(shape, **self._tensor_kwargs(value_template))
+            layers.append((key_tensor, value_tensor))
+
+        self._materializations += 1
+        return tuple(layers)
+
+    def materialize_like(self, torch_module: Any, template: Any) -> Any:
+        """Materialize paged state using the template cache's container type."""
+
+        legacy = self.materialize_legacy_cache(torch_module, template=template)
+        if isinstance(template, list):
+            return list(legacy)
+        if isinstance(template, tuple):
+            return legacy
+
+        factory = getattr(type(template), "from_legacy_cache", None)
+        if not callable(factory):
+            raise HuggingFacePagedCacheError(
+                "cache type cannot be reconstructed from legacy KV tensors"
+            )
+        try:
+            return factory(legacy)
+        except Exception as error:
+            raise HuggingFacePagedCacheError(
+                "cache type rejected reconstructed legacy KV tensors"
+            ) from error
 
     def truncate(self, token_count: int) -> int:
         """Mirror speculative rollback and return the number of removed tokens."""

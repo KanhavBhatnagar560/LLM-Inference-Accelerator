@@ -101,6 +101,7 @@ class FakePagedCacheMirror:
     def __init__(self):
         self.synchronized = []
         self.truncated = []
+        self.materialized = []
         self.resets = 0
 
     def synchronize(self, cache):
@@ -108,6 +109,10 @@ class FakePagedCacheMirror:
 
     def truncate(self, length):
         self.truncated.append(length)
+
+    def materialize_like(self, torch_module, cache):
+        self.materialized.append(cache)
+        return FakeCache(cache.tokens)
 
     def reset(self):
         self.resets += 1
@@ -370,6 +375,35 @@ class HuggingFaceAdapterTests(unittest.TestCase):
         self.assertEqual(len(mirror.synchronized), 2)
         self.assertEqual(mirror.truncated, [3])
         self.assertEqual(mirror.resets, 1)
+
+    def test_paged_reference_state_is_consumed_by_incremental_forward(self) -> None:
+        model = FakeCachedModel()
+        mirror = FakePagedCacheMirror()
+        adapter = HuggingFaceCausalLM(
+            model,
+            FakeTokenizer(),
+            FakeTorch(),
+            use_kv_cache=True,
+            paged_cache_mirror=mirror,
+            use_paged_cache_reference=True,
+        )
+
+        adapter.next_token_probs([0, 1])
+        adapter.score_proposal([0, 1], [0, 1])
+
+        self.assertEqual(len(mirror.materialized), 1)
+        self.assertEqual(model.calls[-1]["past_length"], 2)
+        self.assertEqual(adapter.cache_stats.paged_reference_forwards, 1)
+
+    def test_paged_reference_requires_a_mirror(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires a paged-cache mirror"):
+            HuggingFaceCausalLM(
+                FakeCachedModel(),
+                FakeTokenizer(),
+                FakeTorch(),
+                use_kv_cache=True,
+                use_paged_cache_reference=True,
+            )
 
     def test_pair_rejects_tokenizers_before_loading_model_weights(self) -> None:
         backends = (FakeTorch(), object(), FakeAutoTokenizer, "4.44.2")

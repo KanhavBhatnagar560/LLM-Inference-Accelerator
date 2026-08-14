@@ -58,6 +58,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="mirror exact model state into the paged INT8 reference cache",
     )
+    generate.add_argument(
+        "--paged-cache-reference-attention",
+        action="store_true",
+        help=(
+            "feed dequantized paged INT8 state back into Hugging Face attention; "
+            "requires --paged-cache-mirror and is a correctness reference"
+        ),
+    )
     generate.add_argument("--paged-cache-block-size", type=int, default=16)
     generate.add_argument("--paged-cache-num-blocks", type=int)
     generate.add_argument("--local-files-only", action="store_true")
@@ -107,6 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--paged-cache-mirror",
         action="store_true",
         help="include paged INT8 shadow-cache conversion",
+    )
+    benchmark.add_argument(
+        "--paged-cache-reference-attention",
+        action="store_true",
+        help=(
+            "benchmark the dequantized paged-cache attention reference path; "
+            "requires --paged-cache-mirror"
+        ),
     )
     benchmark.add_argument("--paged-cache-block-size", type=int, default=16)
     benchmark.add_argument("--paged-cache-num-blocks", type=int)
@@ -163,8 +179,14 @@ def run_demo(
 
 
 def _validate_cache_args(args: argparse.Namespace) -> None:
-    if args.no_kv_cache and args.paged_cache_mirror:
-        raise ValueError("--paged-cache-mirror cannot be combined with --no-kv-cache")
+    if args.no_kv_cache and (
+        args.paged_cache_mirror or args.paged_cache_reference_attention
+    ):
+        raise ValueError("paged-cache options cannot be combined with --no-kv-cache")
+    if args.paged_cache_reference_attention and not args.paged_cache_mirror:
+        raise ValueError(
+            "--paged-cache-reference-attention requires --paged-cache-mirror"
+        )
     if args.paged_cache_block_size < 1:
         raise ValueError("--paged-cache-block-size must be positive")
     if args.paged_cache_num_blocks is not None and args.paged_cache_num_blocks < 1:
@@ -187,6 +209,7 @@ def run_generate(args: argparse.Namespace) -> int:
         local_files_only=args.local_files_only,
         use_kv_cache=not args.no_kv_cache,
         mirror_paged_kv_cache=args.paged_cache_mirror,
+        use_paged_cache_reference=args.paged_cache_reference_attention,
         paged_cache_block_size=args.paged_cache_block_size,
         paged_cache_num_blocks=args.paged_cache_num_blocks,
     )
@@ -256,6 +279,7 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
         cuda_device=args.device,
         use_kv_cache=not args.no_kv_cache,
         mirror_paged_kv_cache=args.paged_cache_mirror,
+        use_paged_cache_reference=args.paged_cache_reference_attention,
         paged_cache_block_size=args.paged_cache_block_size,
         paged_cache_num_blocks=args.paged_cache_num_blocks,
     )
@@ -328,9 +352,13 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
                 "stateless_full_context"
                 if args.no_kv_cache
                 else (
-                    "huggingface_with_paged_int8_mirror"
-                    if args.paged_cache_mirror
-                    else "huggingface_past_key_values"
+                    "paged_int8_reference_attention"
+                    if args.paged_cache_reference_attention
+                    else (
+                        "huggingface_with_paged_int8_mirror"
+                        if args.paged_cache_mirror
+                        else "huggingface_past_key_values"
+                    )
                 )
             ),
         },

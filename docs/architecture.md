@@ -86,7 +86,8 @@ Each key and value head is quantized independently with a symmetric INT8 scale.
 `PythonKVQuantizer` is the numerical oracle and `NativeKVQuantizer` exposes the
 matching C++ CPU kernels. The dequantization error bound and format-level byte
 formulas are documented in `docs/kv-cache.md`. Hugging Face model state can be
-mirrored into this layout, but CUDA attention does not consume it yet.
+mirrored into this layout. A slow reference path can reconstruct standard cache
+tensors from it for attention, but CUDA attention does not consume it directly.
 
 ## CUDA execution contract
 
@@ -103,8 +104,7 @@ benchmark boundaries.
 
 The Hugging Face integration reuses standard `past_key_values` and sends only
 uncached suffix tokens after prefill. Probability rows still return to the CPU
-for exact sampling. The Stage 4 paged INT8 cache is not consumed by model
-execution yet; `--no-kv-cache` retains stateless full-context execution.
+for exact sampling. `--no-kv-cache` retains stateless full-context execution.
 
 With `--paged-cache-mirror`, each new Hugging Face K/V tensor suffix is also
 converted from `[batch, heads, sequence, head_dim]` into per-token entries in
@@ -112,6 +112,15 @@ converted from `[batch, heads, sequence, head_dim]` into per-token entries in
 full refills, and request resets apply the matching truncate/reset operation to
 the mirror. The exact Hugging Face cache remains the attention source, ensuring
 the lossy INT8 shadow cannot change logits or sampling behavior.
+
+With both `--paged-cache-mirror` and
+`--paged-cache-reference-attention`, the adapter instead dequantizes the retained
+paged prefix into `[1, heads, sequence, head_dim]` tensors before each
+incremental forward. It preserves compatible modern cache container types and
+then mirrors the model's returned native cache for the next step. This opt-in
+reference validates the consumption contract but does not remove the native
+output cache, bypass Python materialization, or preserve exact logits after INT8
+quantization.
 
 ## Benchmark contract
 
@@ -167,7 +176,9 @@ comparison but are not isolated total model-footprint measurements.
   cropping, correction replay, and request-boundary resets.
 - Implemented: opt-in model-state conversion into the Stage 4 paged INT8 layout,
   including incremental append and speculative rollback synchronization.
-- Pending: consuming paged INT8 state during attention and device-resident
-  sampling/verification.
+- Implemented: opt-in reference attention consumption by reconstructing standard
+  Hugging Face cache tensors from paged INT8 state.
+- Pending: direct paged INT8 attention consumption and device-resident
+  sampling/verification without Python materialization.
 - Pending: custom CUDA PagedAttention and INT8 cache kernels.
 - Pending: benchmark and quality evidence from documented NVIDIA hardware.

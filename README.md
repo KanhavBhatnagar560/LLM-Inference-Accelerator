@@ -7,7 +7,9 @@ output distribution.
 > **Project status:** Stages 1 through 4 are complete. Stage 5 now has an
 > optional PyTorch CUDA execution layer, Hugging Face `past_key_values` reuse,
 > and an opt-in bridge that mirrors real model K/V tensors into the custom paged
-> INT8 cache. The model still uses its exact native cache for attention.
+> INT8 cache. An additional reference mode dequantizes that paged state back
+> into Hugging Face tensors and consumes it during attention. Custom CUDA
+> PagedAttention remains pending.
 
 ## Why start with a reference engine?
 
@@ -32,6 +34,8 @@ Implemented now:
 - atomic speculative cache appends with checkpoint rollback;
 - per-head symmetric INT8 KV quantization with Python/C++ parity;
 - dequantization error-bound tests;
+- Hugging Face-compatible reconstruction of paged INT8 state;
+- opt-in attention forwards that consume the reconstructed reference cache;
 - separate CUDA draft, target, and transfer streams with event dependencies;
 - reusable device workspaces, pinned host buffers, and nonblocking transfers;
 - optional NVTX profiling ranges;
@@ -108,9 +112,26 @@ atomic multi-token appends, suffix rollback, and INT8 K/V storage.
 Real models can mirror their native cache into `PagedKVCache` by adding
 `--paged-cache-mirror`. The bridge converts Hugging Face tensors from
 `[batch, heads, sequence, head_dim]` into per-token paged entries, applies INT8
-quantization, and follows speculative rollback. It intentionally remains a
-shadow cache so quantization cannot alter logits. CUDA PagedAttention will later
-consume the same layout directly.
+quantization, and follows speculative rollback. By default it remains a shadow
+cache so quantization cannot alter logits.
+
+For correctness and integration testing, the dequantized reference cache can be
+fed back into Hugging Face attention:
+
+```bash
+specdecode generate \
+  --draft-model meta-llama/Llama-3.2-1B \
+  --target-model meta-llama/Llama-3.1-8B \
+  --prompt "Explain paged attention." \
+  --paged-cache-mirror \
+  --paged-cache-reference-attention
+```
+
+This mode reconstructs standard `[1, heads, sequence, head_dim]` tensors in
+Python before an incremental forward. It proves that attention can consume the
+paged cache's logical state, but it is intentionally slow, retains the standard
+Hugging Face output cache, and may perturb logits because the K/V state is INT8.
+It is not the custom CUDA PagedAttention implementation or a performance path.
 
 ## Run tests
 
@@ -125,7 +146,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 3. **Native core** — complete; C++ verification/sampling with Python bindings.
 4. **Memory engine** — complete; paged KV blocks and per-head INT8 quantization.
 5. **CUDA pipeline** — in progress; execution/profiling, Hugging Face cache reuse,
-   and paged INT8 shadow-cache integration are implemented.
+   paged INT8 mirroring, and reference attention consumption are implemented.
 
 See [docs/architecture.md](docs/architecture.md) for the evolving design.
 See [docs/native.md](docs/native.md) for the C ABI and backend contract.

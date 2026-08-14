@@ -27,6 +27,7 @@ class HuggingFaceCacheStats:
     incremental_forwards: int
     exact_cache_hits: int
     cropped_tokens: int
+    paged_reference_forwards: int
 
 
 def _require_backends() -> tuple[Any, Any, Any, str]:
@@ -81,7 +82,12 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         *,
         use_kv_cache: bool = False,
         paged_cache_mirror: HuggingFacePagedCacheMirror | None = None,
+        use_paged_cache_reference: bool = False,
     ) -> None:
+        if use_paged_cache_reference and paged_cache_mirror is None:
+            raise ValueError(
+                "paged-cache reference attention requires a paged-cache mirror"
+            )
         vocab_size = int(model.config.vocab_size)
         super().__init__(vocab_size)
         self.model = model
@@ -89,6 +95,7 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         self._torch = torch_module
         self.use_kv_cache = use_kv_cache
         self.paged_cache_mirror = paged_cache_mirror
+        self.use_paged_cache_reference = use_paged_cache_reference
         self.cuda_runtime: Any | None = None
         self.cuda_stream_role = "target"
         self._cache_tokens: tuple[int, ...] = ()
@@ -98,6 +105,7 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         self._incremental_forwards = 0
         self._exact_cache_hits = 0
         self._cropped_tokens = 0
+        self._paged_reference_forwards = 0
         self.model.eval()
 
         vocabulary = dict(tokenizer.get_vocab())
@@ -121,6 +129,7 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         tokenizer: Any | None = None,
         use_kv_cache: bool = True,
         mirror_paged_kv_cache: bool = False,
+        use_paged_cache_reference: bool = False,
         paged_cache_block_size: int = 16,
         paged_cache_num_blocks: int | None = None,
     ) -> "HuggingFaceCausalLM":
@@ -149,12 +158,17 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
                     num_blocks=paged_cache_num_blocks,
                 ),
             )
+        if use_paged_cache_reference and mirror is None:
+            raise ValueError(
+                "paged-cache reference attention requires paged-cache mirroring"
+            )
         return cls(
             model,
             tokenizer,
             torch,
             use_kv_cache=use_kv_cache,
             paged_cache_mirror=mirror,
+            use_paged_cache_reference=use_paged_cache_reference,
         )
 
     @property
@@ -178,6 +192,7 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
             incremental_forwards=self._incremental_forwards,
             exact_cache_hits=self._exact_cache_hits,
             cropped_tokens=self._cropped_tokens,
+            paged_reference_forwards=self._paged_reference_forwards,
         )
 
     def reset_cache(self) -> None:
@@ -364,6 +379,18 @@ class HuggingFaceCausalLM(CausalLMProbabilityAdapter):
         except Exception:
             self.reset_cache()
             raise
+        if self.use_paged_cache_reference and past_key_values is not None:
+            if self.paged_cache_mirror is None:
+                raise AssertionError("paged-cache reference is missing its mirror")
+            try:
+                past_key_values = self.paged_cache_mirror.materialize_like(
+                    self._torch,
+                    past_key_values,
+                )
+            except Exception:
+                self.reset_cache()
+                raise
+            self._paged_reference_forwards += 1
         input_tokens = tokens[reuse_length:]
         try:
             outputs = self._forward(
@@ -457,6 +484,7 @@ class HuggingFaceModelPair:
         cuda_device: str | None = None,
         use_kv_cache: bool = True,
         mirror_paged_kv_cache: bool = False,
+        use_paged_cache_reference: bool = False,
         paged_cache_block_size: int = 16,
         paged_cache_num_blocks: int | None = None,
     ) -> "HuggingFaceModelPair":
@@ -493,6 +521,7 @@ class HuggingFaceModelPair:
             tokenizer=draft_tokenizer,
             use_kv_cache=use_kv_cache,
             mirror_paged_kv_cache=mirror_paged_kv_cache,
+            use_paged_cache_reference=use_paged_cache_reference,
             paged_cache_block_size=paged_cache_block_size,
             paged_cache_num_blocks=paged_cache_num_blocks,
         )
@@ -506,6 +535,7 @@ class HuggingFaceModelPair:
             tokenizer=target_tokenizer,
             use_kv_cache=use_kv_cache,
             mirror_paged_kv_cache=mirror_paged_kv_cache,
+            use_paged_cache_reference=use_paged_cache_reference,
             paged_cache_block_size=paged_cache_block_size,
             paged_cache_num_blocks=paged_cache_num_blocks,
         )

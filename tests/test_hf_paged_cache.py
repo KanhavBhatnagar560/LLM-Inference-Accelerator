@@ -28,6 +28,8 @@ class FakeRows:
 class FakeKVTensor:
     def __init__(self, heads, sequence_length, head_dim, base, *, batch=1):
         self.shape = (batch, heads, sequence_length, head_dim)
+        self.device = "cuda:0"
+        self.dtype = "bfloat16"
         self.rows = [
             [
                 base + head * 0.2 + token * 0.05 + dimension * 0.01
@@ -57,6 +59,42 @@ class FakeModernCache:
 
     def to_legacy_cache(self):
         return self.legacy
+
+    @classmethod
+    def from_legacy_cache(cls, legacy):
+        return cls(legacy)
+
+
+class FakeMaterializedTensor:
+    def __init__(self, values, shape, *, device=None, dtype=None):
+        self.values = values
+        self.shape = shape
+        self.device = device
+        self.dtype = dtype
+
+
+class FakeTorch:
+    def tensor(self, values, *, device=None, dtype=None):
+        shape = (
+            len(values),
+            len(values[0]),
+            len(values[0][0]),
+            len(values[0][0][0]),
+        )
+        return FakeMaterializedTensor(
+            values,
+            shape,
+            device=device,
+            dtype=dtype,
+        )
+
+    def empty(self, shape, *, device=None, dtype=None):
+        return FakeMaterializedTensor(
+            None,
+            tuple(shape),
+            device=device,
+            dtype=dtype,
+        )
 
 
 def make_cache(sequence_length, *, heads=2, head_dim=4, batch=1):
@@ -132,6 +170,45 @@ class HuggingFacePagedCacheMirrorTests(unittest.TestCase):
         self.assertEqual(self.mirror.stats.rollback_tokens, 3)
         self.assertEqual(self.mirror.stats.resets, 1)
         self.assertEqual(self.mirror.stats.paged_cache.allocated_blocks, 0)
+
+    def test_materialization_restores_hugging_face_tensor_layout(self) -> None:
+        source = make_cache(3)
+        self.mirror.synchronize(source)
+
+        materialized = self.mirror.materialize_legacy_cache(
+            FakeTorch(),
+            template=source,
+        )
+
+        self.assertEqual(len(materialized), 2)
+        key_tensor, value_tensor = materialized[0]
+        self.assertEqual(key_tensor.shape, (1, 2, 3, 4))
+        self.assertEqual(value_tensor.shape, (1, 2, 3, 4))
+        self.assertEqual(key_tensor.device, "cuda:0")
+        self.assertEqual(key_tensor.dtype, "bfloat16")
+        quantized = self.mirror.cache.read_quantized_token("model", 2)
+        expected = 1.0 + 0.0 + 2 * 0.05 + 3 * 0.01
+        actual = key_tensor.values[0][0][2][3]
+        self.assertLessEqual(
+            abs(actual - expected),
+            quantized.keys[0][0].scale / 2.0 + 1e-12,
+        )
+        self.assertEqual(self.mirror.stats.materializations, 1)
+
+    def test_materialize_like_preserves_modern_cache_container(self) -> None:
+        template = FakeModernCache(make_cache(2))
+        self.mirror.synchronize(template)
+
+        materialized = self.mirror.materialize_like(FakeTorch(), template)
+
+        self.assertIsInstance(materialized, FakeModernCache)
+        self.assertEqual(materialized.legacy[1][1].shape, (1, 2, 2, 4))
+
+    def test_empty_cache_materializes_geometry_without_values(self) -> None:
+        materialized = self.mirror.materialize_legacy_cache(FakeTorch())
+
+        self.assertEqual(materialized[0][0].shape, (1, 2, 0, 4))
+        self.assertEqual(materialized[0][1].shape, (1, 2, 0, 4))
 
     def test_invalid_model_cache_is_rejected_atomically(self) -> None:
         with self.assertRaises(HuggingFacePagedCacheError):

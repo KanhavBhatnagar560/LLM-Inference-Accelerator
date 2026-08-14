@@ -8,7 +8,8 @@ backend tests on non-NVIDIA development machines.
 This milestone does not include a custom CUDA PagedAttention kernel, CUDA INT8
 KV-cache kernel, or measured NVIDIA results. The Hugging Face adapter reuses its
 standard `past_key_values`. It can mirror them into the custom paged INT8 cache,
-but attention does not consume that shadow representation.
+and an opt-in reference mode can dequantize that state back into standard tensors
+for attention. Direct paged attention remains pending.
 
 ## CUDA runtime
 
@@ -108,6 +109,15 @@ model exposes a cache representation that cannot be cropped safely.
 quantization in the timed path and records
 `huggingface_with_paged_int8_mirror` as the cache mode. It is useful for
 correctness and integration profiling, not as the optimized cache baseline.
+
+Adding `--paged-cache-reference-attention` records
+`paged_int8_reference_attention` and reconstructs the paged prefix before every
+incremental forward. This measures a correctness bridge with Python
+dequantization and tensor creation, not custom PagedAttention. The native model
+cache returned by each forward remains live, so allocator peaks do not represent
+the custom compact format in isolation. Because attention consumes lossy INT8
+state, compare output quality and token hashes with the exact Hugging Face cache
+mode before drawing performance conclusions.
 
 Do not report the project's target throughput, latency, memory, or batch-size
 numbers as achieved until a checked-in JSON report from documented NVIDIA

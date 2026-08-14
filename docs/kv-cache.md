@@ -8,8 +8,9 @@ format-level memory accounting.
 
 Real-model decoding reuses the standard Hugging Face `past_key_values`
 representation. An opt-in Stage 5 mirror now converts those exact model tensors
-into this custom paged INT8 layout and follows cache rollback. The model does not
-consume the quantized shadow during attention yet. Stage 5 still owns CUDA
+into this custom paged INT8 layout and follows cache rollback. A separate opt-in
+reference mode reconstructs standard tensors from the paged representation and
+feeds them into Hugging Face attention. Stage 5 still owns direct CUDA
 PagedAttention kernels and measured performance.
 
 ## Hugging Face shadow integration
@@ -28,6 +29,26 @@ its native cache and truncates the mirror to the same logical token count. A new
 request resets both. The mirror is deliberately opt-in with
 `--paged-cache-mirror` because its Python tensor conversion is a correctness
 bridge, not an optimized inference path.
+
+## Reference attention consumption
+
+`materialize_legacy_cache()` reads the logical sequence through its block table,
+dequantizes every per-head vector, and returns one key/value tensor pair per
+layer in `[1, heads, sequence, head_dim]` layout. When given an existing cache as
+a template, it preserves each tensor's device and dtype. `materialize_like()`
+also reconstructs modern cache containers that expose `from_legacy_cache()`.
+
+Generation and benchmarking can enable this path with both
+`--paged-cache-mirror` and `--paged-cache-reference-attention`. Before an
+incremental forward, the adapter crops the native and paged states together,
+materializes the retained paged prefix, and supplies that reconstructed cache to
+the model. The returned native cache is mirrored again for the next step.
+
+This establishes an auditable attention-consumption reference without changing
+the default exact-cache path. It does not reduce live model memory, it performs
+dequantization and tensor construction in Python, and INT8 reconstruction can
+change logits. Custom CUDA kernels must be evaluated against this path's layout
+and against the exact Hugging Face baseline.
 
 ## Tensor and page layout
 
