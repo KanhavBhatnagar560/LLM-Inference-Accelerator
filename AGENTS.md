@@ -29,10 +29,11 @@ bridge from real model tensors into `PagedKVCache`. An opt-in reference path now
 reconstructs Hugging Face cache tensors from paged INT8 state and consumes them
 during attention. Persistent packed CUDA buffers now mirror one reference-cache
 sequence into physical-page order with incremental suffix transfer and rollback
-clearing. Direct paged INT8 attention, CUDA kernels, and hardware measurements
-remain pending. The
-dependency-free Python engine remains the oracle, and an optional C++17 shared
-library handles sampling, verification, and INT8 quantization.
+clearing. An unfused torch-native path now gathers those pages, dequantizes one
+layer on-device, and dispatches CUDA scaled-dot-product attention. Fused custom
+CUDA kernels, model-layer integration, and hardware measurements remain pending.
+The dependency-free Python engine remains the oracle, and an optional C++17
+shared library handles sampling, verification, and INT8 quantization.
 
 Implemented:
 
@@ -82,6 +83,8 @@ Implemented:
 - persistent packed CUDA INT8 K/V and float32 scale storage;
 - incremental changed-suffix transfer, device block-table views, and
   rollback-safe physical-slot clearing;
+- direct physical-page gathering, on-device dequantization, grouped-query head
+  expansion, offset-aware causal masking, and target-stream CUDA SDPA;
 - CUDA allocator snapshots and reproducible environment metadata;
 - identical-seed target/speculative warmup and measured comparisons;
 - versioned JSON throughput, latency-percentile, memory, and token-hash reports.
@@ -89,8 +92,8 @@ Implemented:
 Not implemented yet:
 
 - an HTTP or production serving layer;
-- model attention that consumes packed `PagedKVCache` storage directly;
-- custom CUDA PagedAttention and INT8 quantization kernels;
+- Hugging Face model-layer integration for packed-cache attention;
+- fused custom CUDA PagedAttention and INT8 quantization kernels;
 - device-resident verification and sampling;
 - shared-prefix cache blocks and copy-on-write serving optimizations;
 - platform-specific native wheel production;
@@ -214,8 +217,9 @@ streams after transfer events. The standalone Stage 4 cache remains separate;
 an opt-in mirror now converts real K/V suffixes into its layout and follows
 rollback. Exact native model state remains the attention source by default. A
 separate reference mode reconstructs compatible cache tensors from paged INT8
-state before incremental forwards. Direct packed-cache attention and CUDA
-kernels are pending Stage 5 work.
+state before incremental forwards. A standalone unfused CUDA path consumes the
+packed view directly, but Hugging Face layer integration and fused CUDA kernels
+remain Stage 5 work.
 
 Numerical sampling routes through `SamplingBackend`. Python owns every random
 draw and passes explicit uniforms into either implementation. Native acceptance
@@ -260,6 +264,8 @@ The root package exports:
 - `CudaPagedKVCacheStorage`, `CudaPagedKVCacheView`, and
   `CudaPagedKVCacheStats` — persistent physical-page CUDA storage,
   synchronization, and accounting interfaces;
+- `submit_paged_attention` and `CudaPagedAttentionError` — unfused packed-cache
+  dequantization and CUDA SDPA dispatch;
 - `BenchmarkConfig`, `BenchmarkSample`, `BenchmarkMetrics`, and `BenchmarkReport`
   — reproducible comparison configuration and results;
 - `DecoderBenchmarkRunner` and `run_comparison_benchmark` — adapters and the fair
@@ -340,7 +346,7 @@ also be used, but standard-library tests must continue to work.
 
 ## Test coverage through the Stage 5 foundation
 
-The 99 current Python tests plus two CTest executables cover:
+The 101 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -371,6 +377,8 @@ The 99 current Python tests plus two CTest executables cover:
 - dependency-free fake-CUDA stream, event, timing, NVTX, and buffer-pool tests;
 - packed device-page layout, incremental cache upload, rollback clearing, and
   physical-slot reuse between synchronizations;
+- non-contiguous page-table attention, on-device dequantization semantics,
+  grouped-query expansion, causal masking, and stream dependency ordering;
 - pinned nonblocking transfers and Hugging Face stream integration;
 - Hugging Face prompt prefill, incremental suffix scoring, exact cache-boundary
   reuse, speculative suffix cropping, correction replay, and cache resets;
@@ -423,7 +431,7 @@ The dependency-free paged cache implements logical-to-physical block tables,
 deterministic allocation/reclamation, atomic append and suffix rollback, per-head
 INT8 metadata, Python and native CPU quantization kernels, reference
 dequantization, format-level memory accounting, and numerical parity tests.
-Custom paged-cache attention consumption and CUDA kernels remain Stage 5 work.
+Packed-cache attention consumption and fused CUDA kernels remain Stage 5 work.
 
 ### Stage 5 — CUDA execution and benchmarking: in progress
 
@@ -444,12 +452,18 @@ a correctness/profiling bridge, not a compact CUDA execution path.
 
 Also implemented: persistent packed CUDA K/V and scale storage with a device
 block-table view, stable-prefix detection, suffix-only transfer, and
-rollback-safe clearing. This is the kernel input boundary, not attention itself.
+rollback-safe clearing. Storage and synchronization remain separate from the
+attention operation.
 
-Pending: consuming packed Stage 4 state directly during attention,
-device-resident verification/sampling, custom CUDA PagedAttention and INT8
-quantization kernels, isolated memory/batch testing, and measurements on
-documented NVIDIA hardware.
+Also implemented: `submit_paged_attention()` follows the device block table,
+dequantizes one layer on-device, expands grouped K/V heads, applies causal
+masking, and dispatches CUDA SDPA on the target stream. It is an unfused direct
+consumer and materializes temporary K/V tensors.
+
+Pending: Hugging Face model-layer integration, device-resident
+verification/sampling, fused custom CUDA PagedAttention and INT8 quantization
+kernels, isolated memory/batch testing, and measurements on documented NVIDIA
+hardware.
 
 ## Benchmark reporting rules
 

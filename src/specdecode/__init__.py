@@ -26,10 +26,12 @@ from .cuda import (
     CudaUnavailableError,
 )
 from .cuda_kv_cache import (
+    CudaPagedAttentionError,
     CudaPagedKVCacheError,
     CudaPagedKVCacheStats,
     CudaPagedKVCacheStorage,
     CudaPagedKVCacheView,
+    submit_paged_attention,
 )
 from .decoder import DecodeResult, DecodeStats, SpeculativeDecoder, TargetOnlyDecoder
 from .events import TokenEvent, TokenSource
@@ -69,6 +71,7 @@ __all__ = [
     "CudaDependencyError",
     "CudaExecutionRuntime",
     "CudaMemorySnapshot",
+    "CudaPagedAttentionError",
     "CudaPagedKVCacheError",
     "CudaPagedKVCacheStats",
     "CudaPagedKVCacheStorage",
@@ -110,4 +113,5 @@ __all__ = [
     "VerificationResult",
     "load_sampling_backend",
     "run_comparison_benchmark",
+    "submit_paged_attention",
 ]

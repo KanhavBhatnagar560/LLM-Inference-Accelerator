@@ -107,7 +107,10 @@ in physical-page order plus an active device block table. Synchronization reads
 the dependency-free cache oracle, finds the stable logical prefix, uploads only
 the changed suffix on the transfer stream, and zeroes physical slots released
 by rollback. The resulting `CudaPagedKVCacheView` is a kernel-facing contract;
-no model attention kernel consumes it yet.
+`submit_paged_attention()` consumes it by gathering physical pages, dequantizing
+one layer on-device, expanding grouped K/V heads, building an offset-aware
+causal mask, and dispatching PyTorch scaled-dot-product attention on the target
+stream. It is unfused and materializes gathered K/V tensors before SDPA.
 
 The Hugging Face integration reuses standard `past_key_values` and sends only
 uncached suffix tokens after prefill. Probability rows still return to the CPU
@@ -187,7 +190,9 @@ comparison but are not isolated total model-footprint measurements.
   Hugging Face cache tensors from paged INT8 state.
 - Implemented: persistent packed CUDA K/V and scale storage, device block-table
   transfer, changed-suffix upload, and rollback-safe slot clearing.
-- Pending: direct paged INT8 attention consumption and device-resident
+- Implemented: direct unfused consumption of packed pages with on-device
+  dequantization, grouped-query expansion, causal masking, and CUDA SDPA.
+- Pending: Hugging Face layer integration and device-resident
   sampling/verification without Python materialization.
-- Pending: custom CUDA PagedAttention and INT8 cache kernels.
+- Pending: fused custom CUDA PagedAttention and INT8 cache kernels.
 - Pending: benchmark and quality evidence from documented NVIDIA hardware.

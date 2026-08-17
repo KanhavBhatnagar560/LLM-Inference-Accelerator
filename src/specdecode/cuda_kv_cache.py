@@ -1,8 +1,8 @@
-"""Device-resident packed INT8 KV-cache storage for future CUDA attention."""
+"""Packed INT8 CUDA KV-cache storage and unfused attention consumption."""
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +12,10 @@ from .kv_cache import KVCacheConfig, PagedKVCache, QuantizedKVToken
 
 class CudaPagedKVCacheError(RuntimeError):
     """Raised when a reference cache cannot be synchronized to CUDA storage."""
+
+
+class CudaPagedAttentionError(RuntimeError):
+    """Raised when packed CUDA cache tensors cannot serve an attention call."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,3 +365,139 @@ class CudaPagedKVCacheStorage:
         self._uploaded_tokens += len(upload_tokens)
         self._cleared_tokens += len(stale_slots)
         return task
+
+
+def submit_paged_attention(
+    runtime: CudaExecutionRuntime,
+    query: Any,
+    cache: CudaPagedKVCacheView,
+    layer_index: int,
+    *,
+    wait_for: Sequence[CudaTask[Any]] = (),
+) -> CudaTask[Any]:
+    """Run unfused causal attention directly from a packed cache view.
+
+    ``query`` must use ``[1, query_heads, query_tokens, head_dim]`` layout and
+    represent the final ``query_tokens`` positions in ``cache``. The operation
+    gathers physical pages through the device block table, dequantizes only the
+    requested layer on-device, expands grouped K/V heads when needed, and uses
+    PyTorch scaled-dot-product attention on the target stream.
+
+    This is a direct packed-cache consumption path, but not a fused custom CUDA
+    kernel: gathered K/V tensors are materialized before SDPA.
+    """
+
+    if not isinstance(cache, CudaPagedKVCacheView):
+        raise TypeError("cache must be a CudaPagedKVCacheView")
+    if (
+        isinstance(cache.token_count, bool)
+        or not isinstance(cache.token_count, int)
+        or cache.token_count < 1
+        or isinstance(cache.block_size, bool)
+        or not isinstance(cache.block_size, int)
+        or cache.block_size < 1
+    ):
+        raise CudaPagedAttentionError("packed cache metadata is invalid")
+    query_shape = tuple(int(dimension) for dimension in query.shape)
+    key_shape = tuple(int(dimension) for dimension in cache.keys.shape)
+    value_shape = tuple(int(dimension) for dimension in cache.values.shape)
+    scale_shape = tuple(int(dimension) for dimension in cache.key_scales.shape)
+    if len(query_shape) != 4 or query_shape[0] != 1:
+        raise CudaPagedAttentionError(
+            "query must use [1, heads, tokens, head_dim] layout"
+        )
+    if len(key_shape) != 5 or value_shape != key_shape:
+        raise CudaPagedAttentionError("packed K/V tensors have invalid geometry")
+    if len(scale_shape) != 4 or tuple(cache.value_scales.shape) != scale_shape:
+        raise CudaPagedAttentionError("packed scale tensors have invalid geometry")
+    if scale_shape != key_shape[:-1] or key_shape[1] != cache.block_size:
+        raise CudaPagedAttentionError("packed scales do not match K/V geometry")
+    if str(query.device) != str(runtime.device):
+        raise CudaPagedAttentionError("query must be on the CUDA runtime device")
+    if any(
+        str(tensor.device) != str(runtime.device)
+        for tensor in (
+            cache.keys,
+            cache.values,
+            cache.key_scales,
+            cache.value_scales,
+            cache.block_table,
+        )
+    ):
+        raise CudaPagedAttentionError("packed cache must be on the CUDA runtime device")
+    if (
+        isinstance(layer_index, bool)
+        or not isinstance(layer_index, int)
+        or not 0 <= layer_index < key_shape[2]
+    ):
+        raise CudaPagedAttentionError("layer_index is outside the packed cache")
+    query_heads, query_tokens, head_dim = query_shape[1:]
+    kv_heads = key_shape[3]
+    if query_heads < 1 or query_tokens < 1 or query_tokens > cache.token_count:
+        raise CudaPagedAttentionError("query token count is outside the packed cache")
+    if head_dim != key_shape[4] or query_heads % kv_heads:
+        raise CudaPagedAttentionError("query heads are incompatible with packed K/V")
+    active_blocks = (cache.token_count + cache.block_size - 1) // cache.block_size
+    if int(cache.block_table.numel()) != active_blocks:
+        raise CudaPagedAttentionError("device block table does not cover cached tokens")
+
+    torch = runtime.torch_module
+    functional = getattr(getattr(torch, "nn", None), "functional", None)
+    attention = getattr(functional, "scaled_dot_product_attention", None)
+    if not callable(attention):
+        raise CudaPagedAttentionError(
+            "PyTorch does not provide scaled_dot_product_attention"
+        )
+
+    def run() -> Any:
+        keys = (
+            cache.keys.index_select(0, cache.block_table)
+            .flatten(0, 1)[: cache.token_count]
+            .select(1, layer_index)
+        )
+        values = (
+            cache.values.index_select(0, cache.block_table)
+            .flatten(0, 1)[: cache.token_count]
+            .select(1, layer_index)
+        )
+        key_scales = (
+            cache.key_scales.index_select(0, cache.block_table)
+            .flatten(0, 1)[: cache.token_count]
+            .select(1, layer_index)
+            .unsqueeze(-1)
+        )
+        value_scales = (
+            cache.value_scales.index_select(0, cache.block_table)
+            .flatten(0, 1)[: cache.token_count]
+            .select(1, layer_index)
+            .unsqueeze(-1)
+        )
+        keys = (keys.to(dtype=query.dtype) * key_scales.to(dtype=query.dtype))
+        values = values.to(dtype=query.dtype) * value_scales.to(dtype=query.dtype)
+        keys = keys.transpose(0, 1).unsqueeze(0)
+        values = values.transpose(0, 1).unsqueeze(0)
+        groups = query_heads // kv_heads
+        if groups > 1:
+            keys = keys.repeat_interleave(groups, dim=1)
+            values = values.repeat_interleave(groups, dim=1)
+
+        key_positions = torch.arange(cache.token_count, device=query.device)
+        query_positions = torch.arange(
+            cache.token_count - query_tokens,
+            cache.token_count,
+            device=query.device,
+        )
+        causal_mask = query_positions.unsqueeze(1) >= key_positions.unsqueeze(0)
+        return attention(
+            query,
+            keys,
+            values,
+            attn_mask=causal_mask,
+            dropout_p=0.0,
+        )
+
+    return runtime.submit_target(
+        run,
+        wait_for=wait_for,
+        label="specdecode.target.paged_attention",
+    )

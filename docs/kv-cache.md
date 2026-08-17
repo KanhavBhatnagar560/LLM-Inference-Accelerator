@@ -68,8 +68,21 @@ slot IDs handles rollback followed by reuse before the next synchronization.
 
 One storage object binds to one logical sequence so a later kernel cannot
 silently consume another request's pages. This boundary does not quantize on the
-GPU and is not connected to Hugging Face attention yet; those are separate Stage
-5 milestones.
+GPU and is not connected to Hugging Face model layers yet; those are separate
+Stage 5 milestones.
+
+`submit_paged_attention()` accepts a query in
+`[1, query_heads, query_tokens, head_dim]` layout for the final cached positions.
+It follows the device block table instead of assuming contiguous physical pages,
+selects one model layer, dequantizes INT8 K/V using the per-head scales, repeats
+K/V heads for grouped-query attention, and dispatches PyTorch SDPA with an
+explicit causal mask. The operation waits on cache synchronization through a
+CUDA event and runs on the target stream.
+
+This path consumes packed cache storage directly, but it is deliberately
+unfused: page gathering and dequantization materialize temporary tensors before
+SDPA. A fused kernel should replace those operations only after NVIDIA profiling
+shows the interface is correct and the materialization cost matters.
 
 ## Tensor and page layout
 

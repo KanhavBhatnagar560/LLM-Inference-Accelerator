@@ -10,7 +10,8 @@ output distribution.
 > INT8 cache. An additional reference mode dequantizes that paged state back
 > into Hugging Face tensors and consumes it during attention. A persistent
 > packed CUDA storage boundary now exposes INT8 pages, scales, and block tables
-> for a future kernel. Custom CUDA PagedAttention remains pending.
+> to an unfused torch-native attention path. Fused custom CUDA PagedAttention
+> and end-to-end model integration remain pending.
 
 ## Why start with a reference engine?
 
@@ -41,6 +42,8 @@ Implemented now:
 - reusable device workspaces, pinned host buffers, and nonblocking transfers;
 - persistent packed CUDA INT8 pages with incremental synchronization and
   rollback-safe slot clearing;
+- direct physical-page gathering, on-device dequantization, grouped-query head
+  expansion, causal masking, and CUDA SDPA dispatch;
 - optional NVTX profiling ranges;
 - deterministic unit tests and distribution-equivalence coverage;
 - zero required third-party Python dependencies.
@@ -145,6 +148,13 @@ quantizes through the CPU reference cache and is not yet wired into model
 attention; it establishes storage and synchronization semantics for the custom
 kernel milestone.
 
+`submit_paged_attention()` now consumes that view without reconstructing Python
+or Hugging Face cache objects. It gathers logical pages through the device block
+table, dequantizes one layer on-device, applies an offset-aware causal mask, and
+submits PyTorch scaled-dot-product attention on the target stream. This is an
+unfused direct-consumption path: it materializes gathered K/V tensors and is not
+yet installed inside Hugging Face model layers.
+
 ## Run tests
 
 ```bash
@@ -159,7 +169,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 4. **Memory engine** — complete; paged KV blocks and per-head INT8 quantization.
 5. **CUDA pipeline** — in progress; execution/profiling, Hugging Face cache reuse,
    paged INT8 mirroring, reference attention consumption, and a packed
-   device-storage boundary are implemented.
+   device-storage boundary with unfused CUDA SDPA consumption are implemented.
 
 See [docs/architecture.md](docs/architecture.md) for the evolving design.
 See [docs/native.md](docs/native.md) for the C ABI and backend contract.

@@ -9,7 +9,8 @@ This milestone does not include a custom CUDA PagedAttention kernel, CUDA INT8
 KV-cache kernel, or measured NVIDIA results. The Hugging Face adapter reuses its
 standard `past_key_values`. It can mirror them into the custom paged INT8 cache,
 and an opt-in reference mode can dequantize that state back into standard tensors
-for attention. Direct paged attention remains pending.
+for attention. An unfused torch-native operator can consume packed pages
+directly, but the Hugging Face adapter and benchmark CLI do not invoke it yet.
 
 The repository also exposes `CudaPagedKVCacheStorage`, a kernel-facing packed
 device layout for one reference-cache sequence. It keeps INT8 keys/values,
@@ -17,6 +18,13 @@ float32 per-head scales, and the active block table on CUDA, incrementally
 uploads changed suffixes, and clears released slots. It is tested as storage and
 synchronization infrastructure only; the benchmark CLI does not use it for
 attention and no speedup is attributed to it.
+
+`submit_paged_attention()` gathers pages through that device block table,
+dequantizes the requested layer on-device, expands grouped K/V heads, applies an
+offset-aware causal mask, and dispatches PyTorch scaled-dot-product attention on
+the target stream. It avoids Python/Hugging Face cache reconstruction but still
+materializes gathered K/V tensors, so it is a correctness and profiling step
+toward a fused kernel rather than the final optimized path.
 
 ## CUDA runtime
 
@@ -108,7 +116,7 @@ tokenization, and Hugging Face weight download time are excluded.
 
 The current adapter copies probability rows back to the CPU for exact Python
 sampling, so this is not yet a fully device-resident decoder. Custom CUDA
-PagedAttention, INT8 cache consumption, batched serving, and isolated
+PagedAttention fusion, model-layer integration, batched serving, and isolated
 process-level memory comparisons remain future work. Use `--no-kv-cache` when a
 model exposes a cache representation that cannot be cropped safely.
 
