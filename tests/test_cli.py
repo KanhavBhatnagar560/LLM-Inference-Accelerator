@@ -48,6 +48,21 @@ class CliTests(unittest.TestCase):
         self.assertFalse(args.paged_cache_mirror)
         self.assertFalse(args.paged_cache_reference_attention)
 
+    def test_serve_arguments_parse_without_loading_optional_dependencies(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "serve",
+                "--draft-model",
+                "draft/model",
+                "--target-model",
+                "target/model",
+            ]
+        )
+        self.assertEqual(args.host, "127.0.0.1")
+        self.assertEqual(args.port, 8000)
+        self.assertEqual(args.max_body_bytes, 1_048_576)
+        self.assertFalse(args.paged_cache_mirror)
+
     def test_conflicting_cache_modes_fail_before_model_loading(self) -> None:
         error_output = io.StringIO()
         arguments = [

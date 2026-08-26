@@ -10,8 +10,8 @@ output distribution.
 > INT8 cache. An additional reference mode dequantizes that paged state back
 > into Hugging Face tensors and consumes it during attention. A persistent
 > packed CUDA storage boundary now exposes INT8 pages, scales, and block tables
-> to an unfused torch-native attention path. Fused custom CUDA PagedAttention
-> and end-to-end model integration remain pending.
+> to an unfused torch-native attention path. Request-safe HTTP serving and
+> optional native platform wheels are also available.
 
 ## Why start with a reference engine?
 
@@ -45,6 +45,8 @@ Implemented now:
 - direct physical-page gathering, on-device dequantization, grouped-query head
   expansion, causal masking, and CUDA SDPA dispatch;
 - optional NVTX profiling ranges;
+- bounded JSON health and generation HTTP endpoints;
+- optional native-library compilation in platform wheels;
 - deterministic unit tests and distribution-equivalence coverage;
 - zero required third-party Python dependencies.
 
@@ -137,23 +139,46 @@ This mode reconstructs standard `[1, heads, sequence, head_dim]` tensors in
 Python before an incremental forward. It proves that attention can consume the
 paged cache's logical state, but it is intentionally slow, retains the standard
 Hugging Face output cache, and may perturb logits because the K/V state is INT8.
-It is not the custom CUDA PagedAttention implementation or a performance path.
 
 `CudaPagedKVCacheStorage` provides the next kernel-facing boundary. It packs one
 logical sequence into persistent CUDA tensors with
 `[physical_block, block_offset, layer, head, head_dim]` key/value layout, keeps
 the active logical-to-physical block table on device, uploads only a changed
 suffix, and clears released slots after rollback. The current implementation
-quantizes through the CPU reference cache and is not yet wired into model
-attention; it establishes storage and synchronization semantics for the custom
-kernel milestone.
+quantizes through the CPU reference cache, establishing storage and
+synchronization semantics for the custom kernel boundary.
 
 `submit_paged_attention()` now consumes that view without reconstructing Python
 or Hugging Face cache objects. It gathers logical pages through the device block
 table, dequantizes one layer on-device, applies an offset-aware causal mask, and
 submits PyTorch scaled-dot-product attention on the target stream. This is an
-unfused direct-consumption path: it materializes gathered K/V tensors and is not
-yet installed inside Hugging Face model layers.
+unfused direct-consumption path that materializes gathered K/V tensors.
+
+## Serve generation over HTTP
+
+Load the model pair once and expose request-safe JSON generation:
+
+```bash
+specdecode serve \
+  --draft-model meta-llama/Llama-3.2-1B \
+  --target-model meta-llama/Llama-3.1-8B \
+  --target-device cuda:0 \
+  --dtype bfloat16
+```
+
+The server binds to `127.0.0.1:8000` by default. It provides `GET /health` and
+`POST /v1/generate`; model access is serialized so request-local Hugging Face
+caches cannot overlap.
+
+```bash
+curl http://127.0.0.1:8000/v1/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Explain speculative decoding.","max_new_tokens":32,"seed":7}'
+```
+
+Platform wheels compile and bundle the optional C++ library when a compatible
+compiler is available. Installation remains usable with the Python backend if
+that optional compilation is unavailable.
 
 ## Run tests
 

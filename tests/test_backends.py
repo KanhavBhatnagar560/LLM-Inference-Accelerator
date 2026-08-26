@@ -1,8 +1,11 @@
 import os
 import random
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
+import specdecode.native as native_module
 from specdecode import DecodeConfig, SpeculativeDecoder, TableModel
 from specdecode.backends import PythonSamplingBackend, load_sampling_backend
 from specdecode.native import NativeLibraryNotFound
@@ -34,6 +37,19 @@ class SequenceRandom(random.Random):
 
 
 class BackendTests(unittest.TestCase):
+    def test_packaged_native_extension_is_discovered(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package = Path(temporary_directory) / "specdecode"
+            package.mkdir()
+            module_path = package / "native.py"
+            module_path.touch()
+            library = package / "libspecdecode_native.cpython-313-darwin.so"
+            library.touch()
+            with mock.patch.object(native_module, "__file__", str(module_path)):
+                candidates = native_module._development_candidates()
+
+        self.assertEqual(candidates[0], library.resolve())
+
     def test_decoder_defaults_to_stable_python_backend(self) -> None:
         model = TableModel({}, default=(1.0, 0.0))
 

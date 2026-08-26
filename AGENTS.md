@@ -33,7 +33,9 @@ clearing. An unfused torch-native path now gathers those pages, dequantizes one
 layer on-device, and dispatches CUDA scaled-dot-product attention. Fused custom
 CUDA kernels, model-layer integration, and hardware measurements remain pending.
 The dependency-free Python engine remains the oracle, and an optional C++17
-shared library handles sampling, verification, and INT8 quantization.
+library handles sampling, verification, and INT8 quantization. The portable
+release surface now includes request-safe HTTP serving and optional native wheel
+bundling.
 
 Implemented:
 
@@ -87,16 +89,17 @@ Implemented:
   expansion, offset-aware causal masking, and target-stream CUDA SDPA;
 - CUDA allocator snapshots and reproducible environment metadata;
 - identical-seed target/speculative warmup and measured comparisons;
-- versioned JSON throughput, latency-percentile, memory, and token-hash reports.
+- versioned JSON throughput, latency-percentile, memory, and token-hash reports;
+- dependency-free JSON health and generation HTTP endpoints;
+- bounded request bodies, request validation, and serialized model-cache access;
+- optional C++17 compilation and native-library discovery in platform wheels.
 
 Not implemented yet:
 
-- an HTTP or production serving layer;
 - Hugging Face model-layer integration for packed-cache attention;
 - fused custom CUDA PagedAttention and INT8 quantization kernels;
 - device-resident verification and sampling;
 - shared-prefix cache blocks and copy-on-write serving optimizations;
-- platform-specific native wheel production;
 - isolated process-level model-memory and maximum-batch measurements;
 - validated performance numbers on NVIDIA hardware.
 
@@ -109,6 +112,7 @@ Do not describe a planned feature or target metric as completed.
 ├── AGENTS.md                    contributor and agent operating guide
 ├── CMakeLists.txt               root native build entry point
 ├── MANIFEST.in                  native sources included in source distributions
+├── setup.py                     optional native platform-wheel build
 ├── README.md                    user-facing overview and status
 ├── docs/
 │   ├── architecture.md          design layers and stage boundaries
@@ -137,6 +141,7 @@ Do not describe a planned feature or target metric as completed.
 │   ├── models.py                sequential and batched model protocols
 │   ├── native.py                lazy ctypes loader and native backend
 │   ├── sampling.py              probability and residual-sampling utilities
+│   ├── server.py                request-safe dependency-free HTTP serving
 │   └── tokenizers.py            compatibility, prompt, and streaming helpers
 └── tests/
     ├── test_batched_scoring.py  causal-logit alignment and dispatch tests
@@ -146,6 +151,7 @@ Do not describe a planned feature or target metric as completed.
     ├── test_huggingface.py      dependency-free adapter component test
     ├── test_hf_paged_cache.py   model-tensor layout and mirror lifecycle tests
     ├── test_kv_cache.py         paging, rollback, quantization, accounting tests
+    ├── test_server.py           service validation and live HTTP endpoint tests
     ├── test_streaming.py        event and prompt validation tests
     └── ...                      CLI, tokenizer, and sampling tests
 ```
@@ -270,6 +276,10 @@ The root package exports:
   — reproducible comparison configuration and results;
 - `DecoderBenchmarkRunner` and `run_comparison_benchmark` — adapters and the fair
   target-only/speculative measurement harness.
+- `GenerationService`, `ServerConfig`, `create_server`, and `serve` — validated
+  JSON generation service and dependency-free threaded HTTP runtime.
+- `RequestValidationError` — client-request validation failure distinct from
+  model execution errors.
 
 The `ProbabilityModel` contract currently requires:
 
@@ -302,6 +312,12 @@ Install and run real-model support:
 ```bash
 python3 -m pip install -e '.[transformers]'
 specdecode generate --draft-model DRAFT --target-model TARGET --prompt "Hello"
+```
+
+Serve the loaded model pair over HTTP:
+
+```bash
+specdecode serve --draft-model DRAFT --target-model TARGET
 ```
 
 Run an instrumented CUDA comparison on NVIDIA hardware:
@@ -346,7 +362,7 @@ also be used, but standard-library tests must continue to work.
 
 ## Test coverage through the Stage 5 foundation
 
-The 101 current Python tests plus two CTest executables cover:
+The 107 current Python tests plus two CTest executables cover:
 
 - valid normalization;
 - rejection of empty, negative, zero-mass, and NaN distributions;
@@ -387,7 +403,9 @@ The 101 current Python tests plus two CTest executables cover:
 - dequantized Hugging Face cache reconstruction, modern-container preservation,
   and opt-in reference-cache attention forwards;
 - fair benchmark seeds, alternating order, latency/throughput aggregation,
-  allocator peaks, validation, and JSON report contents.
+  allocator peaks, validation, and JSON report contents;
+- request validation, deterministic JSON generation, live health/generation
+  endpoints, HTTP errors and body limits, and packaged-native discovery.
 
 Any change to sampling, verification, scheduling, or fallback behavior must add
 or update tests. Prefer deterministic unit cases for branches and a bounded
@@ -423,7 +441,8 @@ GPU measurements are not part of this stage.
 
 The CMake C++17 library, versioned C ABI, `ctypes` bindings, vectorized
 acceptance, native sampling/residual operations, compiled tests, seeded parity,
-and pure-Python fallback are implemented. Native wheel production is deferred.
+and pure-Python fallback are implemented. Platform wheels optionally compile and
+bundle the native library while retaining the Python fallback.
 
 ### Stage 4 — paged and quantized KV cache: complete
 
@@ -464,6 +483,14 @@ Pending: Hugging Face model-layer integration, device-resident
 verification/sampling, fused custom CUDA PagedAttention and INT8 quantization
 kernels, isolated memory/batch testing, and measurements on documented NVIDIA
 hardware.
+
+### Portable release surface — complete
+
+The standard-library HTTP server loads one validated draft/target pair, bounds
+and validates JSON requests, serializes access to request-local model caches,
+and exposes health and generation endpoints. Setuptools platform wheels compile
+and bundle the C++17 library when a compatible compiler exists while retaining
+the Python fallback when compilation is unavailable.
 
 ## Benchmark reporting rules
 

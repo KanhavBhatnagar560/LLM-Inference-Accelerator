@@ -128,6 +128,42 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--paged-cache-num-blocks", type=int)
     benchmark.add_argument("--local-files-only", action="store_true")
     benchmark.add_argument("--trust-remote-code", action="store_true")
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="serve speculative generation over HTTP",
+    )
+    serve_parser.add_argument("--draft-model", required=True)
+    serve_parser.add_argument("--target-model", required=True)
+    serve_parser.add_argument("--draft-revision")
+    serve_parser.add_argument("--target-revision")
+    serve_parser.add_argument("--draft-device", default="auto")
+    serve_parser.add_argument("--target-device", default="auto")
+    serve_parser.add_argument(
+        "--dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.add_argument("--max-body-bytes", type=int, default=1_048_576)
+    serve_parser.add_argument("--max-new-tokens", type=int, default=64)
+    serve_parser.add_argument("--initial-draft-tokens", type=int, default=4)
+    serve_parser.add_argument("--min-draft-tokens", type=int, default=1)
+    serve_parser.add_argument("--max-draft-tokens", type=int, default=8)
+    serve_parser.add_argument("--no-dynamic-draft", action="store_true")
+    serve_parser.add_argument(
+        "--sampling-backend",
+        choices=("auto", "python", "native"),
+        default="auto",
+    )
+    serve_parser.add_argument("--native-library")
+    serve_parser.add_argument("--no-kv-cache", action="store_true")
+    serve_parser.add_argument("--paged-cache-mirror", action="store_true")
+    serve_parser.add_argument("--paged-cache-block-size", type=int, default=16)
+    serve_parser.add_argument("--paged-cache-num-blocks", type=int)
+    serve_parser.add_argument("--local-files-only", action="store_true")
+    serve_parser.add_argument("--trust-remote-code", action="store_true")
     return parser
 
 
@@ -377,6 +413,56 @@ def run_benchmark_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_serve(args: argparse.Namespace) -> int:
+    from .huggingface import HuggingFaceModelPair
+    from .server import GenerationService, ServerConfig, serve
+
+    _validate_cache_args(args)
+    pair = HuggingFaceModelPair.from_pretrained(
+        args.draft_model,
+        args.target_model,
+        draft_revision=args.draft_revision,
+        target_revision=args.target_revision,
+        draft_device=args.draft_device,
+        target_device=args.target_device,
+        dtype=args.dtype,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+        use_kv_cache=not args.no_kv_cache,
+        mirror_paged_kv_cache=args.paged_cache_mirror,
+        paged_cache_block_size=args.paged_cache_block_size,
+        paged_cache_num_blocks=args.paged_cache_num_blocks,
+    )
+    config = DecodeConfig(
+        max_new_tokens=args.max_new_tokens,
+        initial_draft_tokens=args.initial_draft_tokens,
+        min_draft_tokens=args.min_draft_tokens,
+        max_draft_tokens=args.max_draft_tokens,
+        dynamic_draft=not args.no_dynamic_draft,
+        eos_token_id=pair.tokenizer.eos_token_id,
+    )
+    service = GenerationService(
+        pair.draft,
+        pair.target,
+        pair.tokenizer,
+        config,
+        load_sampling_backend(args.sampling_backend, library_path=args.native_library),
+    )
+    print(f"specdecode server listening on http://{args.host}:{args.port}")
+    try:
+        serve(
+            service,
+            ServerConfig(
+                host=args.host,
+                port=args.port,
+                max_body_bytes=args.max_body_bytes,
+            ),
+        )
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -391,6 +477,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_generate(args)
         if args.command == "benchmark":
             return run_benchmark_command(args)
+        if args.command == "serve":
+            return run_serve(args)
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         parser.exit(2, f"specdecode: error: {error}\n")
     parser.error(f"unknown command: {args.command}")

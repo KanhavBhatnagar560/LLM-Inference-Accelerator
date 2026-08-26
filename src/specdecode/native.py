@@ -12,7 +12,6 @@ from pathlib import Path
 from .backends import VerificationResult
 from .kv_cache import QuantizedVector
 
-
 ABI_VERSION = 0x00010001
 
 
@@ -38,12 +37,17 @@ def _platform_library_names() -> tuple[str, ...]:
 
 def _development_candidates() -> tuple[Path, ...]:
     repository = Path(__file__).resolve().parents[2]
+    package = Path(__file__).resolve().parent
+    packaged = tuple(
+        candidate
+        for candidate in package.glob("libspecdecode_native*")
+        if candidate.suffix.lower() in (".dll", ".dylib", ".pyd", ".so")
+    )
     directories = (
-        Path(__file__).resolve().parent,
         repository / "work" / "native-build" / "native",
         repository / "build" / "native",
     )
-    return tuple(
+    return packaged + tuple(
         directory / name
         for directory in directories
         for name in _platform_library_names()
@@ -75,7 +79,9 @@ class _NativeLibrary:
         try:
             self.handle = ctypes.CDLL(path)
         except OSError as error:
-            raise NativeLibraryNotFound(f"could not load native library {path}: {error}") from error
+            raise NativeLibraryNotFound(
+                f"could not load native library {path}: {error}"
+            ) from error
         self.path = path
         self._configure()
         version = int(self.handle.sd_abi_version())

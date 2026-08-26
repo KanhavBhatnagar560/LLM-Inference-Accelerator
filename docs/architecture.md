@@ -23,7 +23,7 @@ the probability law, because it only changes how many proposals are attempted.
 ## Layered design
 
 ```text
-CLI / benchmark harness
+CLI / HTTP service / benchmark harness
         |
 Python orchestration, model adapters, and paged cache oracle
         |
@@ -132,6 +132,20 @@ reference validates the consumption contract but does not remove the native
 output cache, bypass Python materialization, or preserve exact logits after INT8
 quantization.
 
+## Serving contract
+
+`GenerationService` validates JSON request values, encodes prompts through the
+shared tokenizer, creates a request-seeded decoder, and returns generated text,
+token IDs, statistics, and the selected sampling backend. The configured
+`max_new_tokens` is a server-side ceiling rather than a client-controlled
+resource limit.
+
+`GenerationHTTPServer` bounds request bodies and provides `GET /health` plus
+`POST /v1/generate`. HTTP worker threads share one model lock because Hugging
+Face request-local caches live on the model adapters; two generations therefore
+cannot mutate those caches concurrently. Transport errors are returned as JSON
+without inventing model output.
+
 ## Benchmark contract
 
 `TargetOnlyDecoder` provides a direct baseline using the same target model,
@@ -196,3 +210,9 @@ comparison but are not isolated total model-footprint measurements.
   sampling/verification without Python materialization.
 - Pending: fused custom CUDA PagedAttention and INT8 cache kernels.
 - Pending: benchmark and quality evidence from documented NVIDIA hardware.
+
+### Portable release surface — complete
+
+- Dependency-free HTTP health and generation endpoints.
+- Bounded, validated JSON requests and serialized model-cache access.
+- Optional C++17 compilation into discoverable platform-wheel libraries.

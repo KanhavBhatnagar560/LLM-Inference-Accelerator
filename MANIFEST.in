@@ -1,2 +1,3 @@
 include CMakeLists.txt
+include setup.py
 recursive-include native CMakeLists.txt *.h *.c *.cpp

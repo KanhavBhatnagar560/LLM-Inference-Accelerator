@@ -76,12 +76,17 @@ Floating-point vector outputs use tight tolerance comparisons. Draws used for
 decision parity intentionally avoid numerically ambiguous boundaries, except for
 explicit tests such as zero acceptance with a zero uniform.
 
-## Packaging limitation
+## Platform wheels
 
-The source distribution includes the CMake and native source files, but the
-setuptools wheel does not compile or bundle the shared library yet. Platform
-wheel production belongs to a later packaging milestone. Pure Python remains the
-default safe fallback for installations without a compiled library.
+The setuptools build compiles `native/src/native.cpp` as an optional C++17
+extension and places the shared library inside the `specdecode` package. The
+native loader discovers CPython-tagged `.so`/`.pyd` files there before checking
+development build directories or the operating-system search path.
+
+The extension is marked optional: installations without a compatible compiler
+still succeed and use the Python backend. Release wheels must be built and tested
+on each supported target platform; one platform wheel must never be relabeled for
+another operating system or architecture.
 
 See [kv-cache.md](kv-cache.md) for the quantization formula, error bound, paged
 allocator, and memory-accounting contract.
